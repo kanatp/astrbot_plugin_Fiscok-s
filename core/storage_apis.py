@@ -8,8 +8,8 @@ class DataManager:
     """
     用于基本的文件管理
     """
-    def __init__(self, root: Path):
-        self.root = root
+    def __init__(self, root: str):
+        self.root = Path(root)
         self.bili_video_root = self.root / 'bili_videos'
 
         if not self.root.exists():
@@ -66,13 +66,14 @@ class DataManager:
                 }
         return None
 
-    def update_video_storage(self, group_id: str, bvid: str, sender_id: str):
+    def update_bili_video_storage(self, group_id: str, sender_nickname: str,  sender_id: str, bvid: str):
         """
         新增某群组中某视频的分享记录（仅在不存在时写入）
 
         :param group_id: 群组 ID
-        :param bvid: 视频 BV 号
+        :param sender_nickname: 发送者昵称
         :param sender_id: 发送者 ID（作为 first_sharer）
+        :param bvid: 视频 BV 号
         """
         data = self._load_group_data(group_id)
 
@@ -83,7 +84,7 @@ class DataManager:
 
         new_entry = {
             'bvid': bvid,
-            'first_sharer': sender_id,
+            'first_sharer': f'{sender_nickname}（{sender_id}）',
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'count': 1,
         }
