@@ -8,8 +8,8 @@ class DataManager:
     """
     用于基本的文件管理
     """
-    def __init__(self, root):
-        self.root = Path(root)
+    def __init__(self, root: Path):
+        self.root = root
         self.bili_video_root = self.root / 'bili_videos'
 
         if not self.root.exists():
