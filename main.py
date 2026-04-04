@@ -7,11 +7,11 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from .core.bili_apis import get_bvid
 from .core.storage_apis import DataManager
 
-@register("Fiscok's Plugins", "Fiscok", "Fiscok自用插件", "1.0")
+@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "1.0")
 class Core(Star):
     def __init__(self, context: Context):
         super().__init__(context)
-        self.plugin_data_path = get_astrbot_data_path() + "plugin_data/" + self.name
+        self.plugin_data_path = get_astrbot_data_path() + "/plugin_data/" + self.name
         self.data_manager = DataManager(self.plugin_data_path)
 
     @filter.on_llm_request()

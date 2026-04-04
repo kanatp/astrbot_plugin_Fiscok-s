@@ -59,6 +59,8 @@ class DataManager:
         data = self._load_group_data(group_id)
         for entry in data:
             if entry.get('bvid') == bvid:
+                entry.update({'count': entry.get('count') + 1})
+                self._save_group_data(group_id, entry)
                 return {
                     'first_sharer': entry['first_sharer'],
                     'timestamp': entry['timestamp'],
