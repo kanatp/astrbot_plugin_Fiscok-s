@@ -57,16 +57,17 @@ class DataManager:
         :return: 存在时返回 {'first_sharer': ..., 'timestamp': ..., 'count': ...}，否则返回 None
         """
         data = self._load_group_data(group_id)
+        query_result = None
         for entry in data:
             if entry.get('bvid') == bvid:
                 entry.update({'count': entry.get('count') + 1})
-                self._save_group_data(group_id, entry)
-                return {
+                query_result = {
                     'first_sharer': entry['first_sharer'],
                     'timestamp': entry['timestamp'],
                     'count': entry['count'],
                 }
-        return None
+        self._save_group_data(group_id, data)
+        return query_result
 
     def update_bili_video_storage(self, group_id: str, sender_nickname: str,  sender_id: str, bvid: str):
         """
