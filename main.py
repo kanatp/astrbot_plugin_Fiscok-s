@@ -42,7 +42,7 @@ class Core(Star):
                 timestamp = video_storage['timestamp']
                 count = video_storage['count']
 
-                response_message = (f'本消息已经被{first_sharer}于{timestamp}发布过啦！'
+                response_message = (f'本视频已经被{first_sharer}于{timestamp}发布过啦！'
                                     f'目前已经被群友发布了{count}次，又要重复吗，这绝望的轮回...')
                 yield event.plain_result(response_message)
             else:
