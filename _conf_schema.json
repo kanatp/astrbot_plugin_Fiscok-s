@@ -1,0 +1,12 @@
+{
+  "emoji_learn_positive" : {
+    "describe" : "bot偷取群友meme的触发概率",
+    "type" : "float",
+    "default" : 0.1
+  },
+  "emoji_attach_positive" : {
+    "describe" : "bot发言时携带meme的概率",
+    "type" : "float",
+    "default" : 0.7
+  }
+}

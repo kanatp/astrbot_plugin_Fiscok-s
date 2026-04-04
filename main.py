@@ -1,24 +1,40 @@
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
+from astrbot.api.provider import ProviderRequest
 from astrbot.api import logger
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-@register("helloworld", "YourName", "一个简单的 Hello World 插件", "1.0.0")
-class MyPlugin(Star):
+from .core.bili_apis import get_bvid
+from .core.storage_apis import DataManager
+
+@register("Fiscok's Plugins", "Fiscok", "Fiscok自用插件", "1.0")
+class Core(Star):
     def __init__(self, context: Context):
         super().__init__(context)
+        self.plugin_data_path = get_astrbot_data_path() / "plugin_data" / self.name
+        self.data_manager = DataManager(self.plugin_data_path)
 
-    async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
+    @filter.on_llm_request()
+    async def handle_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+        """
+        在获取 LLM 回复之前拦截请求，并注入提示词修改
+        """
+        logger.info(f"被拦截的请求体如下: {req.system_prompt}")
+        ## 循环原始消息获取其中所有的表情包
+        for message_part in event.message_obj.raw_message.message:
+            if message_part.get("type") == "image" and message_part.get("data", {}).get("sub_type") == 1:
+                logger.info(f"找到表情包: {message_part.get('data', {}).get('url')}")
 
-    # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
-    @filter.command("helloworld")
-    async def helloworld(self, event: AstrMessageEvent):
-        """这是一个 hello world 指令""" # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
-        user_name = event.get_sender_name()
-        message_str = event.message_str # 用户发的纯文本消息字符串
-        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
-        yield event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!") # 发送一条纯文本消息
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
+    async def bili_video_count(self, event: AstrMessageEvent):
+        bvid = await get_bvid(event)
+        group_id = event.get_group_id()
+        sender_id = event.get_sender_id()
+        if bvid and group_id and sender_id:
+            pass
+        else:
+            # 默认通行
+            return
 
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
