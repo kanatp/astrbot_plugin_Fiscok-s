@@ -13,7 +13,7 @@ class Core(Star):
         super().__init__(context)
         self.config = config
         self.plugin_data_path = get_astrbot_data_path() + "/plugin_data/" + self.name
-        self.data_manager = DataManager(self.plugin_data_path)
+        self.data_manager = DataManager(self.plugin_data_path, config)
 
     @filter.on_llm_request()
     async def handle_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):

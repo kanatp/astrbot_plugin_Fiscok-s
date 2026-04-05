@@ -1,12 +1,34 @@
 {
-  "emoji_learn_positive" : {
-    "describe" : "bot偷取群友meme的触发概率",
-    "type" : "float",
-    "default" : 0.1
+  "meme_config": {
+    "describe" : "meme发送/获取相关配置",
+    "type" : "object",
+    "items" : {
+      "emoji_learn_positive" : {
+        "describe" : "bot偷取群友meme的触发概率",
+        "type" : "float",
+        "default" : 0.1
+      },
+      "emoji_attach_positive" : {
+        "describe" : "bot发言时携带meme的概率",
+        "type" : "float",
+        "default" : 0.7
+      }
+    }
   },
-  "emoji_attach_positive" : {
-    "describe" : "bot发言时携带meme的概率",
-    "type" : "float",
-    "default" : 0.7
+  "twitter_subscription_config": {
+    "describe": "twitter订阅相关配置",
+    "type": "object",
+    "items": {
+      "twitter_push_cache_size": {
+        "describe": "twitter推送的缓存大小，单位为条",
+        "type": "integer",
+        "default": 100
+      },
+      "twitter_push_interval": {
+        "describe": "twitter推送的时间间隔，单位为小时",
+        "type": "integer",
+        "default": 2
+      }
+    }
   }
 }
