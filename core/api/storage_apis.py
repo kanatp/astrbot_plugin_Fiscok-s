@@ -150,7 +150,7 @@ class DataManager:
 
         local_urls = []
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(trust_env=True) as session:
             # 用 for 循环构建任务列表
             tasks = []
             for url in image_urls:
