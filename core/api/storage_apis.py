@@ -163,6 +163,8 @@ class DataManager:
                     )
                 )
                 local_urls.append(save_dir / filename)
+                logger.info(f"[Fiscok's][dataManager][twitterImageDownload]"
+                            f"已创建下载任务: {url} -> {save_dir / filename}")
                 tasks.append(task)
 
             # 并发执行所有任务，gather 会等待全部完成
@@ -244,7 +246,7 @@ class DataManager:
         self._save_push_record(push_record)
         return result
 
-    def update_twitter_cache(self, update_content: Dict):
+    async def update_twitter_cache(self, update_content: Dict):
         """
         缓存推特更新内容，供定时推送使用，最大缓存数量由config给出，超出后按照时间戳淘汰最旧的记录
         """
@@ -266,9 +268,7 @@ class DataManager:
         if not image_urls:
             logger.info(f"[Fiscok's][dataManager][updateTwitterCache]没有图片需要下载，跳过图片缓存")
 
-        local_image_paths = asyncio.run(
-            self._twitter_image_download(twitter_id, content_id, image_urls)
-        )
+        local_image_paths = await self._twitter_image_download(twitter_id, content_id, image_urls)
         logger.info(f"[Fiscok's][dataManager][updateTwitterCache]图片下载完成，local_image_paths={local_image_paths}")
 
         # 将文本内容写入一个文本文件，方便后续推送时读取
