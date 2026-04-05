@@ -98,11 +98,15 @@ async def fetch_twitter_data(twitter_id: str, manager: DataManager):
                 if desc_el is None or not (desc_el.text or "").strip():
                     continue
 
-                content_id = content_id_el.text.split("/")[-1] if content_id_el else "error"
+                logger.info(desc_el.text)
+                logger.info(pubdate_el.text if pubdate_el is not None else "no pubDate")
+                logger.info(content_id_el.text)
+
+                content_id = content_id_el.text.split("/")[-1]
                 if manager.cache_in_storage(twitter_id, content_id):
                     logger.info(f"[Fiscok's][twitter_fetch]内容 {content_id} 已存在缓存中，跳过")
                     continue  # 已缓存过，跳过
-                if content_id == "error":
+                if content_id == "":
                     logger.warning(f"[Fiscok's][twitter_fetch]未能正确解析 content_id，跳过")
                     continue
 
