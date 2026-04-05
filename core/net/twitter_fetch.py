@@ -78,6 +78,7 @@ async def fetch_twitter_data(twitter_id: str, manager: DataManager):
     """
     import aiohttp
 
+    # 上传之前记得修改！！
     url = f"http://8.220.191.165:1200/twitter/user/{twitter_id}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
