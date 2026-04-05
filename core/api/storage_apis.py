@@ -270,6 +270,8 @@ class DataManager:
 
         local_image_paths = await self._twitter_image_download(twitter_id, content_id, image_urls)
         logger.info(f"[Fiscok's][dataManager][updateTwitterCache]图片下载完成，local_image_paths={local_image_paths}")
+        for idx, path in enumerate(local_image_paths):
+            local_image_paths[idx] = str(path) if path else None  # 将 Path 对象转换为字符串路径，下载失败的图片路径为 None
 
         # 将文本内容写入一个文本文件，方便后续推送时读取
         output_file = {
