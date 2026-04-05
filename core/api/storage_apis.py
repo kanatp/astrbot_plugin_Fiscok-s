@@ -31,7 +31,7 @@ class DataManager:
 
             self.root.mkdir(parents=True, exist_ok=True)
             self.bili_video_root.mkdir(parents=True, exist_ok=True)
-            self.twitter_push_root.mkdir(parents=True, exist_ok=True)
+            self.twitter_cache_root.mkdir(parents=True, exist_ok=True)
 
             logger.info('[DataManager] 已完成数据目录构建]')
         else:
