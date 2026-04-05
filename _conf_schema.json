@@ -21,12 +21,12 @@
     "items": {
       "twitter_push_cache_size": {
         "describe": "twitter推送的缓存大小，单位为条",
-        "type": "integer",
+        "type": "int",
         "default": 100
       },
       "twitter_push_interval": {
         "describe": "twitter推送的时间间隔，单位为小时",
-        "type": "integer",
+        "type": "int",
         "default": 2
       }
     }
