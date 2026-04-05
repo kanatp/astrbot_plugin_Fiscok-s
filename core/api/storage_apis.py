@@ -11,6 +11,7 @@ class DataManager:
     def __init__(self, root: str):
         self.root = Path(root)
         self.bili_video_root = self.root / 'bili_videos'
+        self.twitter_push_root = self.root / 'twitter_push'
 
         if not self.root.exists():
             self.create_folder(self)
@@ -25,11 +26,13 @@ class DataManager:
 
             self.root.mkdir(parents=True, exist_ok=True)
             self.bili_video_root.mkdir(parents=True, exist_ok=True)
+            self.twitter_push_root.mkdir(parents=True, exist_ok=True)
 
             logger.info('[DataManager] 已完成数据目录构建]')
         else:
             logger.info('[DataManager] 数据目录已存在')
 
+    # --- bilibili视频统计基础组件 ---
     def _get_group_file(self, group_id: str) -> Path:
         """获取群组对应的 JSON 文件路径"""
         return self.bili_video_root / f'{group_id}.json'
@@ -48,6 +51,7 @@ class DataManager:
         with open(file, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
+    # -- bilibili视频统计核心接口 ---
     def get_bili_video_storage(self, group_id: str, bvid: str) -> dict | None:
         """
         查询某群组中某视频的分享记录
@@ -94,3 +98,51 @@ class DataManager:
         data.append(new_entry)
         self._save_group_data(group_id, data)
         logger.info(f'[DataManager] 已记录 bvid={bvid} 由 {sender_id} 首次分享于群 {group_id}')
+
+    # --- 推特订阅基础组件
+
+
+    # --- 推特数据读写
+    def add_twitter_subscription(self, group_id: str, twitter_handle: str):
+        """
+        添加推特订阅记录
+        """
+        pass
+
+    def remove_twitter_subscription(self, group_id: str, twitter_handle: str):
+        """
+        移除推特订阅记录
+        """
+        pass
+
+    def cache_twitter_update(self, twitter_handle: str, update_content: str):
+        """
+        缓存推特更新内容，供定时推送使用
+        """
+        pass
+
+    def clear_used_twitter_cache(self):
+        """
+        定期清理推送过的推特更新缓存
+        """
+        pass
+
+    def update_twitter_target_groups(self, twitter_handle: str, group_id: str):
+        """
+        更新推特订阅的目标群聊列表
+
+        :param twitter_handle: 推特账号
+        :param group_id: 群聊 ID
+        """
+        pass
+
+    def get_twitter_target_groups(self, twitter_handle: str) -> list:
+        """
+        获取订阅某推特账号的目标群聊列表
+
+        :param twitter_handle: 推特账号
+        :return: 群聊 ID 列表
+        """
+        pass
+
+
