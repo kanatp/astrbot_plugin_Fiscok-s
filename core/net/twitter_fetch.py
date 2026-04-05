@@ -78,7 +78,7 @@ async def fetch_twitter_data(twitter_id: str, manager: DataManager):
     """
     import aiohttp
 
-    url = f"http://localhost:1200/twitter/user/{twitter_id}"
+    url = f"http://8.220.191.165:1200/twitter/user/{twitter_id}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status != 200:

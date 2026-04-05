@@ -6,6 +6,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core.api.bili_apis import get_bvid
 from .core.api.storage_apis import DataManager
+from .core.net.twitter_fetch import fetch_twitter_data
 
 @register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "1.0")
 class Core(Star):
@@ -25,6 +26,16 @@ class Core(Star):
         for message_part in event.message_obj.raw_message.message:
             if message_part.get("type") == "image" and message_part.get("data", {}).get("sub_type") == 1:
                 logger.info(f"找到表情包: {message_part.get('data', {}).get('url')}")
+
+    # 临时测试用指令
+    @filter.command('test', alias={'测试'})
+    async def test_command(self, event: AstrMessageEvent):
+        """
+        这是一个测试指令，用于验证推特缓存功能
+        """
+        await fetch_twitter_data('aimi_sound', self.data_manager)
+        yield event.plain_result("已执行测试指令，检查日志以验证推特")
+
 
     # --- Bilibili视频发布统计（火星救援） ---
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
