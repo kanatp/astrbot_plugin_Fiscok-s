@@ -13,6 +13,7 @@ import subprocess
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from typing import List, Dict, Any
+import re
 
 @register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "1.0")
 class Core(Star):
@@ -150,11 +151,20 @@ class Core(Star):
 
     @twitter_manager.command('subscribe', alias={'订阅'})
     async def twitter_subscribe(self, event: AstrMessageEvent, twitter_id: str, alias: str = None):
-       flag = self.data_manager.add_twitter_subscription(event.get_group_id(), twitter_id, alias, event.unified_msg_origin)
-       if not flag:
-           yield event.plain_result(f"订阅失败，可能是因为已经订阅了 @{twitter_id}，或者数据存储出现问题")
-           return
-       yield event.plain_result(f"已订阅推特账号 @{twitter_id}({alias if alias else '无'})，请等待更新推送")
+        if not re.match(r'^[A-Za-z0-9_]{1,15}$', twitter_id):
+            yield event.plain_result("无效的 Twitter ID...也许你应该再看看")
+            return
+
+        flag = self.data_manager.add_twitter_subscription(
+           event.get_group_id(),
+           twitter_id,
+           alias,
+           event.unified_msg_origin
+        )
+        if not flag:
+            yield event.plain_result(f"订阅失败，可能是因为已经订阅了 @{twitter_id}，或者数据存储出现问题")
+            return
+        yield event.plain_result(f"已订阅推特账号 @{twitter_id}({alias if alias else '无'})，请等待更新推送")
 
     @twitter_manager.command('unsubscribe', alias={'取消订阅'})
     async def twitter_unsubscribe(self, event: AstrMessageEvent, twitter_id: str):
@@ -173,6 +183,7 @@ class Core(Star):
             response_message += f"- @{sub['twitter_id']} ({sub['alias'] if sub['alias'] else '无'})\n"
         yield event.plain_result(response_message)
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @twitter_manager.command('update_cookie', alias={'更新Cookie'})
     async def twitter_update_cookie(self, event: AstrMessageEvent, auth_token: str, ct0: str):
         env_path = "/rsshub/.env"  # 容器内的挂载路径
@@ -185,6 +196,7 @@ class Core(Star):
         logger.info("已更新 Twitter Cookie 并重启 RSSHub，新的订阅推送将在几分钟内生效")
         yield event.plain_result("已更新 Twitter Cookie 并重启 RSSHub，新的订阅推送将在几分钟内生效")
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @twitter_manager.command('check_available', alias={'检查连接状态'})
     async def twitter_check_available(self, event: AstrMessageEvent):
         status = await check_availability()
