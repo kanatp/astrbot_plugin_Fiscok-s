@@ -349,8 +349,30 @@ class DataManager:
         with open(file, 'w', encoding='utf-8') as f:
             json.dump(record, f, ensure_ascii=False, indent=2)
 
+    def _get_unified_msg_origin_record(self) -> Path:
+        """获取已推送消息来源记录的 JSON 文件路径"""
+        return self.root / "unified_msg_origin_record.json"
+
+    def _load_unified_msg_origin_record(self) -> Dict[str, str]:
+        """读取已推送消息来源记录，返回 {group_id: twitter_id} 的字典，文件不存在则返回空字典"""
+        file = self._get_unified_msg_origin_record()
+        if not file.exists():
+            return {}
+        with open(file, 'r', encoding='utf-8') as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                logger.error(f"[Fiscok's][dataManager][_load_unified_msg_origin_record]解析已推送消息来源记录失败，文件可能损坏: {file}")
+                return {}
+
+    def _save_unified_msg_origin_record(self, record: Dict[str, str]):
+        """将已推送消息来源记录写回 JSON 文件"""
+        file = self._get_unified_msg_origin_record()
+        with open(file, 'w', encoding='utf-8') as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+
     # --- 推特订阅管理 ---
-    def add_twitter_subscription(self, group_id: str, twitter_id: str, alias: str = None):
+    def add_twitter_subscription(self, group_id: str, twitter_id: str, alias: str, umo: str) -> bool:
         """
         添加推特订阅记录
         文件结构示例：
@@ -364,21 +386,33 @@ class DataManager:
         ]
         """
         record = self._load_subscription_record()
-        for entry in record:
-            if entry.get("twitter_id") == twitter_id:
-                if group_id not in entry.get("group_ids", []):
-                    entry.get("group_ids", []).append(group_id)
-                    logger.info(f"[DataManager] 已添加推特订阅: group_id({group_id})添加订阅{twitter_id}")
-                break
-            else:
-                record.append({
-                    "twitter_id": twitter_id,
-                    "alias": alias,
-                    "group_ids": [group_id],
-                })
-                logger.info(f"[DataManager] 已创建推特订阅: group_id({group_id})添加订阅{twitter_id}")
+        umo_dict = self._load_unified_msg_origin_record()
+
+        # 建立哈希表以便之后基于此发送信息
+        if group_id not in umo_dict.keys():
+            umo_dict[group_id] = umo
+
+        if twitter_id not in self.get_twitter_subscriptions():
+            record.append({
+                "twitter_id": twitter_id,
+                "alias": alias,
+                "group_ids": [group_id],
+            })
+            logger.info(f"[DataManager] 已创建推特订阅: group_id({group_id})添加订阅{twitter_id}")
+        else:
+            for entry in record:
+                if entry.get("twitter_id") == twitter_id:
+                    if group_id not in entry.get("group_ids", []):
+                        entry.get("group_ids", []).append(group_id)
+                        logger.info(f"[DataManager] 已添加推特订阅: group_id({group_id})添加订阅{twitter_id}")
+                        break
+                    else:
+                        logger.warning(f"[DataManager] 添加推特订阅失败: group_id({group_id})已订阅{twitter_id}")
+                        return False
 
         self._save_subscription_record(record)
+        self._save_unified_msg_origin_record(umo_dict)
+        return True
 
     def remove_twitter_subscription(self, group_id: str, twitter_id: str):
         """
@@ -422,3 +456,9 @@ class DataManager:
         获取所有被订阅的 twitter_id 列表，供定时更新缓存使用
         """
         return self._load_subscription_record()
+
+    def get_umo(self) -> Dict[str, str]:
+        """
+        获取 group_id 与 twitter_id 的映射关系，供定时推送使用
+        """
+        return self._load_unified_msg_origin_record()

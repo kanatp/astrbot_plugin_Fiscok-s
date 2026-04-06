@@ -1,14 +1,4 @@
 {
-  "api_key": {
-    "describe": "astrbot的API密钥，必须设置且不能修改",
-    "type": "string",
-    "default": ""
-  },
-  "port": {
-    "describe": "astrbot监听的端口",
-    "type": "int",
-    "default": 6185
-  },
   "meme_config": {
     "describe" : "meme发送/获取相关配置",
     "type" : "object",

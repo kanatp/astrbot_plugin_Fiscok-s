@@ -1,9 +1,9 @@
-from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register
 from astrbot.api.provider import ProviderRequest
 from astrbot.api import logger, AstrBotConfig
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-from astrbot.api.message_components import Node, Plain, Image
+from astrbot.api.message_components import Node, Plain, Image, Nodes
 
 from .core.api.bili_apis import get_bvid
 from .core.api.storage_apis import DataManager
@@ -11,7 +11,6 @@ from .core.net.twitter_fetch import fetch_twitter_data, check_availability
 
 import subprocess
 import asyncio
-import aiohttp
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from typing import List, Dict, Any
 
@@ -54,13 +53,28 @@ class Core(Star):
                 logger.info(f"找到表情包: {message_part.get('data', {}).get('url')}")
 
     # 临时测试用指令
-    @filter.command('test', alias={'测试'})
-    async def test_command(self, event: AstrMessageEvent):
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command('pull_cache_test', alias={'拉取测试'})
+    async def test_command_1(self, event: AstrMessageEvent):
         """
         这是一个测试指令，用于验证推特缓存功能
         """
         await fetch_twitter_data('aimi_sound', self.data_manager)
         yield event.plain_result("已执行测试指令，检查日志以验证推特")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command('clear_cache_test', alias={'推送测试'})
+    async def test_command_2(self, event: AstrMessageEvent):
+        """
+        这是一个测试指令，用于验证推特定时推送功能
+        """
+        umo = self.data_manager.get_umo().get("326748687")
+        logger.info(f"当前统一消息来源列表: {umo}")
+        forward_node = self._quote_info_create("爱美", "aimi_sound")
+        message_chain = MessageChain(chain=[forward_node])
+
+        await self.context.send_message(umo, message_chain)
+        yield event.plain_result("已执行测试指令，检查对应群聊以验证推特定时推送")
 
     # --- Bilibili视频发布统计（火星救援） ---
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
@@ -101,7 +115,9 @@ class Core(Star):
             await asyncio.sleep(3600)  # 每小时更新一次
             if self.config.get("twitter_subscription_available"):
                 subscriptions = self.data_manager.get_twitter_subscriptions()
+                logger.info(f"[Fiscok's][twitter_push]正在更新推特缓存")
                 for twitter_id in subscriptions:
+                    logger.info(f"[Fiscok's][twitter_push]正在拉取推特账号 @{twitter_id} 的最新动态")
                     await asyncio.sleep(180) # 每次请求间隔3分钟，避免过于频繁导致推特账号异常
                     await fetch_twitter_data(twitter_id, self.data_manager)
 
@@ -111,48 +127,20 @@ class Core(Star):
         将未推送的推特缓存推送到对应的群聊
         """
         subscriptions = self.data_manager.get_all_twitter_subscriptions()
+        unified_msg_origins = self.data_manager.get_umo()
 
         for subscription in subscriptions:
             alias = subscription['alias'] if subscription['alias'] else subscription['twitter_id']
             twitter_id = subscription['twitter_id']
+            group_ids = subscription['group_id']
 
-            title_node = {
-                "type": "Node",
-                "uin": "640439951",
-                "name": "鱼豆腐转发版",
-                "content": [
-                    {"type": "Plain", "text": f"{alias} 的推特账号 @{twitter_id} 的最新动态"}
-                ]
-            }
-            body_node = self._quote_info_create_api(subscription['twitter_id'])
-            message_payload = [title_node, body_node]
+            forward_node = self._quote_info_create(alias, twitter_id)
+            message_chain = MessageChain(chain=[forward_node])
 
-            groups: List[str] = subscription['groups']
-            for group in groups:
-                # umo 格式：platform:message_type:session_id
-                umo = f"aiocqhttp:GroupMessage:{group}"
-                await self._send_proactive_message(
-                    umo,
-                    message_payload
-                )
-
-    # --- HTTP API 主动推送消息 ---
-    async def _send_proactive_message(self, umo: str, messages: list):
-        """通过 AstrBot HTTP API 主动推送消息"""
-        url = f"http://localhost:{self.config.get("port")}/api/v1/im/message"
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-Key": self.config.get("api_key", "YOUR_SECRET_TOKEN")
-        }
-        payload = {
-            "umo": umo,
-            "message": messages
-        }
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    print(f"推送失败: {umo}, status={resp.status}")
+            for group_id in group_ids:
+                umo = unified_msg_origins[group_id]
+                logger.info(f"[Fiscok's][twitter_push]正在向群 {group_id} 推送 @{twitter_id} 的最新动态")
+                await self.context.send_message(umo, message_chain)
 
     # --- 推特订阅推送指令组 ---
     @filter.command_group('twitter_manager', alias={'推特管理'})
@@ -161,8 +149,11 @@ class Core(Star):
 
     @twitter_manager.command('subscribe', alias={'订阅'})
     async def twitter_subscribe(self, event: AstrMessageEvent, twitter_id: str, alias: str = None):
-       self.data_manager.add_twitter_subscription(twitter_id, event.get_group_id(), alias)
-       yield event.plain_result(f"已订阅推特账号 @{twitter_id}，别名: {alias if alias else '无'}，请等待更新推送")
+       flag = self.data_manager.add_twitter_subscription(event.get_group_id(), twitter_id, alias, event.unified_msg_origin)
+       if not flag:
+           yield event.plain_result(f"订阅失败，可能是因为已经订阅了 @{twitter_id}，或者数据存储出现问题")
+           return
+       yield event.plain_result(f"已订阅推特账号 @{twitter_id}({alias if alias else '无'})，请等待更新推送")
 
     @twitter_manager.command('unsubscribe', alias={'取消订阅'})
     async def twitter_unsubscribe(self, event: AstrMessageEvent, twitter_id: str):
@@ -178,7 +169,7 @@ class Core(Star):
             return
         response_message = "当前订阅的推特账号列表：\n"
         for sub in subscriptions:
-            response_message += f"- @{sub['twitter_id']} (别名: {sub['alias'] if sub['alias'] else '无'})\n"
+            response_message += f"- @{sub['twitter_id']} ({sub['alias'] if sub['alias'] else '无'})\n"
         yield event.plain_result(response_message)
 
     @twitter_manager.command('update_cookie', alias={'更新Cookie'})
@@ -199,7 +190,7 @@ class Core(Star):
         if status:
             yield event.plain_result("RSSHub 服务连接正常，可以正常获取推特更新")
         else:
-            yield event.plain_result("RSSHub 服务连接异常，请检查服务状态和网络连接")
+            yield event.plain_result("RSSHub 服务连接异常，可能需要更新cookies")
 
     # --- 图库管理指令组 ---
     @filter.command_group('gallery_manager', alias={'图库管理'})
@@ -216,41 +207,29 @@ class Core(Star):
         logger.info(f"{self.name} 插件已被卸载/停用，相关资源已清理")
 
     # --- 辅助方法 ---
-    def _quote_info_create_api(self, twitter_id: str) -> dict:
-        """构建适用于 HTTP API 的合并转发消息结构（dict 格式）"""
-
-        def _create_node(_text: str, _image_urls: List[str]) -> dict:
-            content_list: List[dict] = [
-                {"type": "Plain", "text": _text}
-            ]
-            for url in _image_urls:
-                content_list.append({
-                    "type": "Image",
-                    "file": url,  # 本地路径对应 file 字段
-                    "url": ""
-                })
-            return {
-                "type": "Node",
-                "uin": "640439951",
-                "name": "鱼豆腐转发版",
-                "content": content_list
-            }
+    def _quote_info_create(self, alias: str, twitter_id: str) -> Nodes:
+        def _create_node(_text: str, _image_urls: List[str]) -> Node:
+            content_list: List[Any] = [Plain(_text)]
+            for _url in _image_urls:
+                if _url:
+                    content_list.append(Image.fromFileSystem(_url))
+            return Node(
+                uin=640439951,
+                name="鱼豆腐转发版",
+                content=content_list
+            )
 
         caches = self.data_manager.get_twitter_cache(twitter_id)
-        merge_content: List[dict] = []
+
+        nodes = [
+            Node(
+                uin=640439951,
+                name="鱼豆腐转发版",
+                content=[Plain(f"{alias} @{twitter_id} 的最新动态，共 {len(caches)} 条")]
+            )
+        ]
 
         for cache in caches:
-            text = cache['text']
-            image_urls = cache['images']
-            node = _create_node(text, image_urls)
-            merge_content.append(node)
+            nodes.append(_create_node(cache['text'], cache['images']))
 
-        # 外层包裹 Node，content 是内层 node list
-        final_node = {
-            "type": "Node",
-            "uin": "640439951",
-            "name": "鱼豆腐转发版",
-            "content": merge_content
-        }
-
-        return final_node
+        return Nodes(nodes=nodes)
