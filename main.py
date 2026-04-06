@@ -29,7 +29,7 @@ class Core(Star):
 
         # 添加定时推送推特内容任务
         self.timer = AsyncIOScheduler()
-        time_list = self.config.get("twitter_push_time", [])
+        time_list = self.config.get('twitter_subscription_config', {}).get("twitter_push_time", [])
         for time_str in time_list:
             self.timer.add_job(
                 self.twitter_scheduled_push,
@@ -113,7 +113,7 @@ class Core(Star):
         """
         while self.running:
             await asyncio.sleep(3600)  # 每小时更新一次
-            if self.config.get("twitter_subscription_available"):
+            if self.config.get('twitter_subscription_config', {}).get("twitter_subscription_available"):
                 subscriptions = self.data_manager.get_twitter_subscriptions()
                 logger.info(f"[Fiscok's][twitter_push]正在更新推特缓存")
                 for twitter_id in subscriptions:
@@ -196,7 +196,14 @@ class Core(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @twitter_manager.command('trigger_cache_update', alias={'手动缓存更新'})
     async def twitter_trigger_cache_update(self, event: AstrMessageEvent):
-        await self.twitter_cache_update()
+        logger.info(f"{self.config}")
+        if self.config.get("twitter_subscription_available"):
+            subscriptions = self.data_manager.get_twitter_subscriptions()
+            logger.info(f"[Fiscok's][twitter_push]正在更新推特缓存")
+            for twitter_id in subscriptions:
+                logger.info(f"[Fiscok's][twitter_push]正在拉取推特账号 @{twitter_id} 的最新动态")
+                await asyncio.sleep(180)  # 每次请求间隔3分钟，避免过于频繁导致推特账号异常
+                await fetch_twitter_data(twitter_id, self.data_manager)
         yield event.plain_result("已手动触发推特缓存更新，请检查日志以验证更新过程")
 
     @filter.permission_type(filter.PermissionType.ADMIN)

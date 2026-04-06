@@ -303,7 +303,7 @@ class DataManager:
         })
 
         # 统计当前 twitter_id 的缓存数量，超过限制则删除时间戳最早的记录
-        max_cache = self.config.get("twitter_cache_max", 100)
+        max_cache = self.config.get('twitter_subscription_config', {}).get("twitter_cache_max", 100)
         if len(cache_list) > max_cache:
             cache_list.sort(key=lambda x: x.get("timestamp", ""))
             to_remove = cache_list[:-max_cache]
