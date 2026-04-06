@@ -79,7 +79,7 @@ async def fetch_twitter_data(twitter_id: str, manager: DataManager):
     import aiohttp
 
     # 上传之前记得修改！！
-    url = f"http://localhost:1200/twitter/user/{twitter_id}"
+    url = f"http://8.220.191.165:1200/twitter/user/{twitter_id}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status != 200:
@@ -140,7 +140,7 @@ async def check_availability() -> bool:
     检查 RSSHub 服务是否可用
     """
     import aiohttp
-    test_url = f"http://localhost:1200/twitter/user/aimi_sound"
+    test_url = f"http://8.220.191.165:1200/twitter/user/aimi_sound"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(test_url) as resp:
