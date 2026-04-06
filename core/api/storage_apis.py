@@ -1,7 +1,7 @@
 from pathlib import Path
 import json
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Any
 import re
 import asyncio
 
@@ -214,6 +214,7 @@ class DataManager:
     def _save_cache_list(self, twitter_id: str, cache_list: List[Dict]):
         """将指定 twitter_id 的缓存列表写回 JSON 文件"""
         dir_path = self._get_cache_list(twitter_id)
+        cache_list.sort(key=lambda x: x.get("timestamp", ""))
         with open(dir_path, 'w', encoding='utf-8') as f:
             json.dump(cache_list, f, ensure_ascii=False, indent=2)
 
@@ -244,6 +245,8 @@ class DataManager:
 
         push_record["last_push"] = datetime.now().isoformat()
         self._save_push_record(push_record)
+
+        result.sort(key=lambda x: x.get("timestamp", ""))
         return result
 
     async def update_twitter_cache(self, update_content: Dict):
@@ -410,9 +413,12 @@ class DataManager:
                 })
         return subscriptions
 
-    def get_all_twitter_subscriptions(self) -> List[str]:
+    def get_twitter_subscriptions(self) -> List[str]:
+        record = self._load_subscription_record()
+        return [entry.get("twitter_id") for entry in record if entry.get("twitter_id")]
+
+    def get_all_twitter_subscriptions(self) -> List[Dict[str, Any]]:
         """
         获取所有被订阅的 twitter_id 列表，供定时更新缓存使用
         """
-        record = self._load_subscription_record()
-        return [entry.get("twitter_id") for entry in record if entry.get("twitter_id")]
+        return self._load_subscription_record()
