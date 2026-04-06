@@ -133,7 +133,7 @@ class Core(Star):
         for subscription in subscriptions:
             alias = subscription['alias'] if subscription['alias'] else subscription['twitter_id']
             twitter_id = subscription['twitter_id']
-            group_ids = subscription['group_id']
+            group_ids = subscription['group_ids']
 
             forward_node = self._quote_info_create(alias, twitter_id)
             message_chain = MessageChain(chain=[forward_node])
@@ -197,7 +197,7 @@ class Core(Star):
     @twitter_manager.command('trigger_cache_update', alias={'手动缓存更新'})
     async def twitter_trigger_cache_update(self, event: AstrMessageEvent):
         logger.info(f"{self.config}")
-        if self.config.get("twitter_subscription_available"):
+        if self.config.get('twitter_subscription_config', {}).get("twitter_subscription_available"):
             subscriptions = self.data_manager.get_twitter_subscriptions()
             logger.info(f"[Fiscok's][twitter_push]正在更新推特缓存")
             for twitter_id in subscriptions:
