@@ -126,6 +126,7 @@ class Core(Star):
         """
         将未推送的推特缓存推送到对应的群聊
         """
+        logger.info(f"[Fiscok's][twitter_push]正在执行定时推送任务")
         subscriptions = self.data_manager.get_all_twitter_subscriptions()
         unified_msg_origins = self.data_manager.get_umo()
 
@@ -191,6 +192,18 @@ class Core(Star):
             yield event.plain_result("RSSHub 服务连接正常，可以正常获取推特更新")
         else:
             yield event.plain_result("RSSHub 服务连接异常，可能需要更新cookies")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @twitter_manager.command('trigger_cache_update', alias={'手动缓存更新'})
+    async def twitter_trigger_cache_update(self, event: AstrMessageEvent):
+        await self.twitter_cache_update()
+        yield event.plain_result("已手动触发推特缓存更新，请检查日志以验证更新过程")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @twitter_manager.command('trigger_scheduled_push', alias={'手动推送'})
+    async def twitter_trigger_scheduled_push(self, event: AstrMessageEvent):
+        await self.twitter_scheduled_push()
+        yield event.plain_result("已手动触发推特定时推送，请检查对应群聊以验证推送内容")
 
     # --- 图库管理指令组 ---
     @filter.command_group('gallery_manager', alias={'图库管理'})
