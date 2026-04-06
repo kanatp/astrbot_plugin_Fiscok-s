@@ -19,15 +19,30 @@
     "describe": "twitter订阅相关配置",
     "type": "object",
     "items": {
+      "twitter_subscription_available": {
+        "describe": "是否启动twitter订阅功能",
+        "type": "bool",
+        "default": false
+      },
       "twitter_push_cache_size": {
         "describe": "twitter推送的缓存大小，单位为条",
         "type": "int",
         "default": 100
       },
-      "twitter_push_interval": {
-        "describe": "twitter推送的时间间隔，单位为小时",
+      "twitter_push_time": {
+        "describe": "twitter推送的时间",
+        "type": "list",
+        "default": [
+          "08:00",
+          "13:00",
+          "19:00",
+          "23:00"
+        ]
+      },
+      "twitter_push_cache_time": {
+        "describe": "更新推特订阅缓存的时间间隔，单位为小时",
         "type": "int",
-        "default": 2
+        "default": 1
       }
     }
   }

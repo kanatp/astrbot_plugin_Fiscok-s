@@ -134,3 +134,17 @@ def _extract_text_and_image_urls(raw_html: str) -> tuple[str, list[str]]:
     parser = _DescriptionParser()
     parser.feed(raw_html)
     return parser.result()
+
+async def check_availability() -> bool:
+    """
+    检查 RSSHub 服务是否可用
+    """
+    import aiohttp
+    test_url = f"http://localhost:1200/twitter/user/aimi_sound"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(test_url) as resp:
+                return resp.status == 200
+    except Exception as e:
+        logger.error(f"无法连接到 RSSHub 服务: {e}")
+        return False

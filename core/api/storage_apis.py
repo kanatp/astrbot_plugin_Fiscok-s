@@ -323,35 +323,96 @@ class DataManager:
         record = self._load_push_record()
         return twitter_id in record.get(group_id, [])
 
+    # --- 推特订阅管理基础组件 ---
+    def _get_subscription_file(self) -> Path:
+        """获取推特订阅记录的 JSON 文件路径"""
+        return self.root / "twitter_subscriptions.json"
+
+    def _load_subscription_record(self) -> List[Dict[str, any]]:
+        """读取推特订阅记录，返回 {twitter_id: [group_id1, group_id2, ...]} 的字典，文件不存在则返回空字典"""
+        file = self._get_subscription_file()
+        if not file.exists():
+            return []
+        with open(file, 'r', encoding='utf-8') as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                logger.error(f"[Fiscok's][dataManager][_load_subscription_record]解析订阅记录失败，文件可能损坏: {file}")
+                return []
+
+    def _save_subscription_record(self, record: List[Dict[str, any]]):
+        """将推特订阅记录写回 JSON 文件"""
+        file = self._get_subscription_file()
+        with open(file, 'w', encoding='utf-8') as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+
     # --- 推特订阅管理 ---
-    def add_twitter_subscription(self, group_id: str, twitter_id: str):
+    def add_twitter_subscription(self, group_id: str, twitter_id: str, alias: str = None):
         """
         添加推特订阅记录
+        文件结构示例：
+        [
+            {
+                twitter_id: "aimi_sound",
+                alias: "爱美",
+                group_ids: ["123456789", "987654321"]
+            },
+            ...
+        ]
         """
-        pass
+        record = self._load_subscription_record()
+        for entry in record:
+            if entry.get("twitter_id") == twitter_id:
+                if group_id not in entry.get("group_ids", []):
+                    entry.get("group_ids", []).append(group_id)
+                    logger.info(f"[DataManager] 已添加推特订阅: group_id({group_id})添加订阅{twitter_id}")
+                break
+            else:
+                record.append({
+                    "twitter_id": twitter_id,
+                    "alias": alias,
+                    "group_ids": [group_id],
+                })
+                logger.info(f"[DataManager] 已创建推特订阅: group_id({group_id})添加订阅{twitter_id}")
+
+        self._save_subscription_record(record)
 
     def remove_twitter_subscription(self, group_id: str, twitter_id: str):
         """
         移除推特订阅记录
         """
-        pass
+        record = self._load_subscription_record()
+        for entry in record:
+            if entry.get("twitter_id") == twitter_id:
+                if group_id in entry.get("group_ids", []):
+                    entry.get("group_ids", []).remove(group_id)
+                    logger.info(f"[DataManager] 已移除推特订阅: group_id({group_id})取消订阅{twitter_id}")
+                    if not entry.get("group_ids"):
+                        record.remove(entry)
+                        logger.info(f"[DataManager] 已删除推特订阅: {twitter_id} 因为没有任何群聊订阅了它")
+                else:
+                    logger.warning(f"[DataManager] 移除推特订阅失败: group_id({group_id})未订阅{twitter_id}")
+                break
 
-    def update_twitter_target_groups(self, twitter_id: str, group_id: str):
+        self._save_subscription_record(record)
+
+    def get_group_twitter_subscriptions(self, group_id: str) -> List[Dict[str, any]]:
         """
-        更新推特订阅的目标群聊列表
-
-        :param twitter_id: 推特账号
-        :param group_id: 群聊 ID
+        获取当前群聊订阅的所有推特账号信息列表，包含 twitter_id、alias
         """
-        pass
+        record = self._load_subscription_record()
+        subscriptions = []
+        for entry in record:
+            if entry.get("group_ids") and group_id in entry.get("group_ids"):
+                subscriptions.append({
+                    "twitter_id": entry.get("twitter_id"),
+                    "alias": entry.get("alias"),
+                })
+        return subscriptions
 
-    def get_twitter_target_groups(self, twitter_id: str) -> list:
+    def get_all_twitter_subscriptions(self) -> List[str]:
         """
-        获取订阅某推特账号的目标群聊列表
-
-        :param twitter_id: 推特账号
-        :return: 群聊 ID 列表
+        获取所有被订阅的 twitter_id 列表，供定时更新缓存使用
         """
-        pass
-
-
+        record = self._load_subscription_record()
+        return [entry.get("twitter_id") for entry in record if entry.get("twitter_id")]
