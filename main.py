@@ -139,6 +139,7 @@ class Core(Star):
             for group_id in group_ids:
                 umo = unified_msg_origins[group_id]
                 logger.info(f"[Fiscok's][twitter_push]正在向群 {group_id} 推送 @{twitter_id} 的最新动态")
+                await asyncio.sleep(3)  # 每次推送间隔3秒，避免过于频繁导致消息发送失败
                 await self.context.send_message(umo, message_chain)
 
     # --- 推特订阅推送指令组 ---
@@ -236,7 +237,7 @@ class Core(Star):
         logger.info(f"{self.name} 插件已被卸载/停用，相关资源已清理")
 
     # --- 辅助方法 ---
-    def _quote_info_create(self, alias: str, twitter_id: str) -> Nodes:
+    def _quote_info_create(self, alias: str, twitter_id: str) -> Nodes | None:
         def _create_node(_text: str, _image_urls: List[str]) -> Node:
             content_list: List[Any] = [Plain(_text)]
             for _url in _image_urls:
@@ -248,7 +249,9 @@ class Core(Star):
                 content=content_list
             )
 
-        caches = self.data_manager.get_twitter_cache(twitter_id)
+        caches = self.data_manager.get_twitter_cache(twitter_id)[:10]  # 只取最新的10条动态进行推送
+        if caches is None:
+            return None
 
         nodes = [
             Node(
