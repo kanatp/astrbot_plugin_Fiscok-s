@@ -134,13 +134,17 @@ class Core(Star):
             group_ids = subscription['group_ids']
 
             forward_node = self._quote_info_create(alias, twitter_id)
+            if forward_node is None:
+                logger.info(f"[Fiscok's][twitter_push]未找到 @{twitter_id} 的有效缓存，跳过推送")
+                continue
             message_chain = MessageChain(chain=[forward_node])
 
             for group_id in group_ids:
                 umo = unified_msg_origins[group_id]
                 logger.info(f"[Fiscok's][twitter_push]正在向群 {group_id} 推送 @{twitter_id} 的最新动态")
-                await asyncio.sleep(3)  # 每次推送间隔3秒，避免过于频繁导致消息发送失败
-                await self.context.send_message(umo, message_chain)
+                await asyncio.sleep(20)  # 每次推送间隔20秒，避免过于频繁导致消息发送失败
+                res = await self.context.send_message(umo, message_chain)
+                logger.info(f"[Fiscok's][twitter_push]向群 {group_id} 推送 @{twitter_id} 的结果: {res}")
 
     # --- 推特订阅推送指令组 ---
     @filter.command_group('twitter_manager', alias={'推特管理'})
@@ -250,7 +254,7 @@ class Core(Star):
             )
 
         caches = self.data_manager.get_twitter_cache(twitter_id)[:10]  # 只取最新的10条动态进行推送
-        if caches is None:
+        if caches is None or len(caches) == 0:
             return None
 
         nodes = [
