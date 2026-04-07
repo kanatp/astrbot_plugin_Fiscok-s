@@ -69,13 +69,8 @@ class Core(Star):
         """
         这是一个测试指令，用于验证推特定时推送功能
         """
-        umo = self.data_manager.get_umo().get("326748687")
-        logger.info(f"当前统一消息来源列表: {umo}")
-        forward_node = self._quote_info_create("爱美", "aimi_sound")
-        message_chain = MessageChain(chain=[forward_node])
-
-        await self.context.send_message(umo, message_chain)
-        yield event.plain_result("已执行测试指令，检查对应群聊以验证推特定时推送")
+        await self.twitter_scheduled_push()
+        yield event.plain_result("已执行测试指令，检查对应群聊以验证推送内容")
 
     # --- Bilibili视频发布统计（火星救援） ---
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
@@ -130,8 +125,10 @@ class Core(Star):
         logger.info(f"[Fiscok's][twitter_push]正在执行定时推送任务")
         subscriptions = self.data_manager.get_all_twitter_subscriptions()
         unified_msg_origins = self.data_manager.get_umo()
+        logger.info(f"[Fiscok's][twitter_push]当前订阅列表: {subscriptions}")
 
         for subscription in subscriptions:
+            logger.info(f"[Fiscok's][twitter_push]正在处理订阅 @{subscription['twitter_id']} 的推送")
             alias = subscription['alias'] if subscription['alias'] else subscription['twitter_id']
             twitter_id = subscription['twitter_id']
             group_ids = subscription['group_ids']
