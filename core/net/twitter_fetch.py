@@ -83,7 +83,7 @@ async def fetch_twitter_data(twitter_id: str, manager: DataManager, url: str):
     if not url:
         logger.error("RSSHub URL 未配置，无法获取 Twitter 数据")
         return
-    url = f"https://{url}/twitter/user/{twitter_id}"
+    url = f"http://{url}/twitter/user/{twitter_id}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status != 200:
@@ -144,7 +144,7 @@ async def check_availability(url: str) -> bool:
     检查 RSSHub 服务是否可用
     """
     import aiohttp
-    test_url = f"https://{url}/twitter/user/aimi_sound"
+    test_url = f"http://{url}/twitter/user/aimi_sound"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(test_url) as resp:
