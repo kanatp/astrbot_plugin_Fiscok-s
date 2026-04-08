@@ -43,6 +43,16 @@
         "describe": "更新推特订阅缓存的时间间隔，单位为小时",
         "type": "int",
         "default": 1
+      },
+      "rssHub_url": {
+        "describe": "rssHub接口地址",
+        "type": "string",
+        "default": "127.0.0.1"
+      },
+      "rssHub_port": {
+        "describe": "rssHub接口端口",
+        "type": "int",
+        "default": 1200
       }
     }
   }

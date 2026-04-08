@@ -25,6 +25,12 @@ class Core(Star):
         self.plugin_data_path = get_astrbot_data_path() + "/plugin_data/" + self.name
         self.data_manager = DataManager(self.plugin_data_path, config)
 
+        self.rssHub_base_url = self.config.get('twitter_subscription_config', {}).get("rssHub_url", "")
+        self.rssHub_port = self.config.get('twitter_subscription_config', {}).get("rssHub_port", 1200)
+        self.rssHub_full_url = f"{self.rssHub_base_url}:{self.rssHub_port}" if self.rssHub_base_url else ""
+        if not self.rssHub_base_url:
+            logger.warning(f"[Fiscok's][twitter_push]未配置 RSSHub 基础 URL，推特订阅功能将无法使用，请在配置中添加 rsshub_base_url")
+
         # 添加缓存轮询更新任务
         asyncio.create_task(self.twitter_cache_update())
 
@@ -60,7 +66,7 @@ class Core(Star):
         """
         这是一个测试指令，用于验证推特缓存功能
         """
-        await fetch_twitter_data('aimi_sound', self.data_manager)
+        await fetch_twitter_data('aimi_sound', self.data_manager, self.rssHub_base_url)
         yield event.plain_result("已执行测试指令，检查日志以验证推特")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -115,7 +121,7 @@ class Core(Star):
                 for twitter_id in subscriptions:
                     logger.info(f"[Fiscok's][twitter_push]正在拉取推特账号 @{twitter_id} 的最新动态")
                     await asyncio.sleep(180) # 每次请求间隔3分钟，避免过于频繁导致推特账号异常
-                    await fetch_twitter_data(twitter_id, self.data_manager)
+                    await fetch_twitter_data(twitter_id, self.data_manager, self.rssHub_full_url)
 
     # --- 推特定时推送 ---
     async def twitter_scheduled_push(self):
@@ -201,7 +207,7 @@ class Core(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @twitter_manager.command('check_available', alias={'检查连接状态'})
     async def twitter_check_available(self, event: AstrMessageEvent):
-        status = await check_availability()
+        status = await check_availability(self.rssHub_full_url)
         if status:
             yield event.plain_result("RSSHub 服务连接正常，可以正常获取推特更新")
         else:

@@ -70,16 +70,20 @@ class _DescriptionParser(HTMLParser):
 
 
 # --- 异步的目标抓取入库 ---
-async def fetch_twitter_data(twitter_id: str, manager: DataManager):
+async def fetch_twitter_data(twitter_id: str, manager: DataManager, url: str):
     """
     :param twitter_id: 目标推特用户名（不带 @）
     :param manager: 数据管理器实例，用于访问存储
+    :param url: rssHub接口地址，默认为本地部署地址
     此处从本地的rssHub中调用接口获取数据，传入推特用户名，返回并解析推特数据，最终返回一个包含推特信息的列表
     """
     import aiohttp
 
     # 上传之前记得修改！！
-    url = f"http://8.220.191.165:1200/twitter/user/{twitter_id}"
+    if not url:
+        logger.error("RSSHub URL 未配置，无法获取 Twitter 数据")
+        return
+    url = f"https://{url}/twitter/user/{twitter_id}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status != 200:
@@ -135,12 +139,12 @@ def _extract_text_and_image_urls(raw_html: str) -> tuple[str, list[str]]:
     parser.feed(raw_html)
     return parser.result()
 
-async def check_availability() -> bool:
+async def check_availability(url: str) -> bool:
     """
     检查 RSSHub 服务是否可用
     """
     import aiohttp
-    test_url = f"http://8.220.191.165:1200/twitter/user/aimi_sound"
+    test_url = f"https://{url}/twitter/user/aimi_sound"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(test_url) as resp:
