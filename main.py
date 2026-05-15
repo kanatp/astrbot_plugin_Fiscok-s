@@ -66,7 +66,7 @@ class Core(Star):
         """
         这是一个测试指令，用于验证推特缓存功能
         """
-        await fetch_twitter_data('aimi_sound', self.data_manager, self.rssHub_base_url)
+        await fetch_twitter_data('aimi_sound', self.data_manager, self.rssHub_full_url)
         yield event.plain_result("已执行测试指令，检查日志以验证推特")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
