@@ -223,7 +223,7 @@ class Core(Star):
             for twitter_id in subscriptions:
                 logger.info(f"[Fiscok's][twitter_push]正在拉取推特账号 @{twitter_id} 的最新动态")
                 await asyncio.sleep(180)  # 每次请求间隔3分钟，避免过于频繁导致推特账号异常
-                await fetch_twitter_data(twitter_id, self.data_manager)
+                await fetch_twitter_data(twitter_id, self.data_manager, self.rssHub_full_url)
         yield event.plain_result("已手动触发推特缓存更新，请检查日志以验证更新过程")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
