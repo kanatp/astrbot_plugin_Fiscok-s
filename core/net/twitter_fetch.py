@@ -83,9 +83,10 @@ async def fetch_twitter_data(twitter_id: str, manager: DataManager, url: str):
     if not url:
         logger.error("RSSHub URL 未配置，无法获取 Twitter 数据")
         return
-    url = f"http://{url}/twitter/user/{twitter_id}"
+    full_url = f"http://{url}/twitter/user/{twitter_id}"
+    logger.info(f"[Fiscok's][twitter_fetch]正在从 RSSHub 获取 Twitter 数据，URL: {full_url}")
     async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
+        async with session.get(full_url) as resp:
             if resp.status != 200:
                 logger.exception(f"Failed to fetch Twitter data: {resp.status}")
                 return
