@@ -1,9 +1,11 @@
 from pathlib import Path
 import json
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import re
 import asyncio
+import random
+import shutil
 
 from astrbot.api import logger, AstrBotConfig
 
@@ -15,13 +17,13 @@ class DataManager:
         self.root = Path(root)
         self.bili_video_root = self.root / 'bili_videos'
         self.twitter_cache_root = self.root / 'twitter_cache'
+        self.meme_library_root = self.root / 'meme_library'
 
         self.config = config
 
         if not self.root.exists():
             self.create_folder(self)
 
-    @staticmethod
     def create_folder(self):
         """
         初始化文件目录
@@ -32,10 +34,13 @@ class DataManager:
             self.root.mkdir(parents=True, exist_ok=True)
             self.bili_video_root.mkdir(parents=True, exist_ok=True)
             self.twitter_cache_root.mkdir(parents=True, exist_ok=True)
+            self.meme_library_root.mkdir(parents=True, exist_ok=True)
 
             logger.info('[DataManager] 已完成数据目录构建]')
         else:
             logger.info('[DataManager] 数据目录已存在')
+            # 确保 meme_library 目录存在（兼容旧版本）
+            self.meme_library_root.mkdir(parents=True, exist_ok=True)
 
     # --- bilibili视频统计基础组件 ---
     def _get_group_file(self, group_id: str) -> Path:
@@ -303,7 +308,7 @@ class DataManager:
         })
 
         # 统计当前 twitter_id 的缓存数量，超过限制则删除时间戳最早的记录
-        max_cache = self.config.get('twitter_subscription_config', {}).get("twitter_cache_max", 100)
+        max_cache = self.config.get('twitter_subscription_config', {}).get("twitter_push_cache_size", 100)
         if len(cache_list) > max_cache:
             cache_list.sort(key=lambda x: x.get("timestamp", ""))
             to_remove = cache_list[:-max_cache]
@@ -462,3 +467,170 @@ class DataManager:
         获取 group_id 与 twitter_id 的映射关系，供定时推送使用
         """
         return self._load_unified_msg_origin_record()
+
+    # --- 表情包库管理基础组件 ---
+    def _get_meme_db_path(self) -> Path:
+        """获取表情包数据库文件路径"""
+        return self.meme_library_root / 'meme_db.json'
+
+    def _load_meme_db(self) -> List[Dict]:
+        """读取表情包数据库，文件不存在则返回空列表"""
+        file = self._get_meme_db_path()
+        if not file.exists():
+            return []
+        with open(file, 'r', encoding='utf-8') as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                logger.error(f"[DataManager] 解析表情包数据库失败，文件可能损坏: {file}")
+                return []
+
+    def _save_meme_db(self, db: List[Dict]):
+        """将表情包数据库写回 JSON 文件"""
+        file = self._get_meme_db_path()
+        with open(file, 'w', encoding='utf-8') as f:
+            json.dump(db, f, ensure_ascii=False, indent=2)
+
+    def _generate_meme_id(self) -> str:
+        """生成唯一的表情包 ID"""
+        now = datetime.now().strftime('%Y%m%d_%H%M%S')
+        rand = random.randint(100, 999)
+        return f"meme_{now}_{rand}"
+
+    # --- 表情包库核心接口 ---
+    def add_meme(self, image_path: str, description: str, tags: List[str], emotion: str, source: str) -> Optional[str]:
+        """
+        添加表情包到数据库
+
+        :param image_path: 图片源路径（将被复制到 meme_library 目录）
+        :param description: 表情包描述
+        :param tags: 标签列表
+        :param emotion: 情绪分类 (happy/sad/surprised/angry/confused/shy/funny/speechless)
+        :param source: 来源（如 group_id）
+        :return: 成功返回 meme_id，失败返回 None
+        """
+        try:
+            meme_id = self._generate_meme_id()
+            source_path = Path(image_path)
+
+            # 确定文件扩展名
+            suffix = source_path.suffix if source_path.suffix else '.jpg'
+            filename = f"{meme_id}{suffix}"
+            dest_path = self.meme_library_root / filename
+
+            # 复制图片文件
+            if source_path.exists():
+                shutil.copy2(str(source_path), str(dest_path))
+                logger.info(f"[DataManager] 已复制表情包图片: {source_path} -> {dest_path}")
+            else:
+                logger.warning(f"[DataManager] 源图片不存在: {source_path}")
+                return None
+
+            # 添加到数据库
+            db = self._load_meme_db()
+            new_entry = {
+                "id": meme_id,
+                "filename": filename,
+                "description": description,
+                "tags": tags,
+                "emotion": emotion,
+                "source": source,
+                "timestamp": datetime.now().isoformat()
+            }
+            db.append(new_entry)
+
+            # 检查缓存大小限制，超出则删除最旧的记录
+            max_cache = self.config.get('meme_config', {}).get("meme_cache_size", 200)
+            if len(db) > max_cache:
+                # 按时间戳排序，删除最旧的
+                db.sort(key=lambda x: x.get("timestamp", ""))
+                to_remove = db[:-max_cache]
+                for item in to_remove:
+                    # 删除对应的图片文件
+                    old_path = self.meme_library_root / item.get("filename", "")
+                    if old_path.exists():
+                        old_path.unlink()
+                        logger.info(f"[DataManager] 已淘汰过期表情包图片: {old_path}")
+                db = db[-max_cache:]
+
+            self._save_meme_db(db)
+
+            logger.info(f"[DataManager] 已添加表情包: id={meme_id}, emotion={emotion}, tags={tags}")
+            return meme_id
+
+        except Exception as e:
+            logger.error(f"[DataManager] 添加表情包失败: {e}", exc_info=True)
+            return None
+
+    def find_meme_by_emotion(self, emotion: str) -> Optional[Dict]:
+        """
+        根据情绪关键词查找表情包
+
+        :param emotion: 情绪关键词（支持中文和英文）
+        :return: 匹配的表情包数据，无匹配返回 None
+        """
+        db = self._load_meme_db()
+        if not db:
+            return None
+
+        # 情绪关键词映射（中文 -> 英文）
+        emotion_map = {
+            "开心": "happy", "高兴": "happy", "快乐": "happy",
+            "难过": "sad", "悲伤": "sad", "伤心": "sad",
+            "惊讶": "surprised", "震惊": "surprised", "惊": "surprised",
+            "愤怒": "angry", "生气": "angry", "怒": "angry",
+            "困惑": "confused", "疑惑": "confused", "懵": "confused",
+            "害羞": "shy", "羞": "shy",
+            "搞笑": "funny", "滑稽": "funny", "笑": "funny",
+            "无语": "speechless", "沉默": "speechless",
+        }
+
+        # 将中文关键词转换为英文
+        normalized_emotion = emotion_map.get(emotion, emotion).lower()
+
+        # 精确匹配 emotion 字段
+        exact_matches = [m for m in db if m.get("emotion", "").lower() == normalized_emotion]
+
+        # 标签匹配
+        tag_matches = [m for m in db if normalized_emotion in [t.lower() for t in m.get("tags", [])]]
+
+        # 合并结果（去重）
+        all_matches = {m["id"]: m for m in exact_matches + tag_matches}
+        matches = list(all_matches.values())
+
+        if matches:
+            return random.choice(matches)
+
+        # 无匹配时随机返回一张
+        return random.choice(db) if db else None
+
+    def find_meme_random(self) -> Optional[Dict]:
+        """随机获取一个表情包"""
+        db = self._load_meme_db()
+        return random.choice(db) if db else None
+
+    def get_meme_by_id(self, meme_id: str) -> Optional[Dict]:
+        """
+        根据 ID 获取表情包数据
+
+        :param meme_id: 表情包 ID
+        :return: 表情包数据，不存在返回 None
+        """
+        db = self._load_meme_db()
+        for entry in db:
+            if entry.get("id") == meme_id:
+                return entry
+        return None
+
+    def get_meme_path(self, meme_id: str) -> Optional[Path]:
+        """
+        获取表情包图片的本地路径
+
+        :param meme_id: 表情包 ID
+        :return: 图片路径，不存在返回 None
+        """
+        meme = self.get_meme_by_id(meme_id)
+        if meme:
+            path = self.meme_library_root / meme.get("filename", "")
+            return path if path.exists() else None
+        return None

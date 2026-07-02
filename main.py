@@ -3,14 +3,20 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api.provider import ProviderRequest
 from astrbot.api import logger, AstrBotConfig
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-from astrbot.api.message_components import Node, Plain, Image, Nodes
+from astrbot.api.message_components import Node, Plain, Image, Nodes, Reply, Forward
 
 from .core.api.bili_apis import get_bvid
 from .core.api.storage_apis import DataManager
+from .core.api.meme_apis import generate_meme_description
+from .core.prompts import format_meme_placeholder_injection
 from .core.net.twitter_fetch import fetch_twitter_data, check_availability
 
 import subprocess
 import asyncio
+import random
+import aiohttp
+import aiofiles
+from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from typing import List, Dict, Any
 import re
@@ -49,15 +55,218 @@ class Core(Star):
         self.timer.start()
 
     @filter.on_llm_request()
-    async def handle_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+    async def on_llm_request_hook(self, event: AstrMessageEvent, req: ProviderRequest):
         """
-        在获取 LLM 回复之前拦截请求，并注入提示词修改
+        在获取 LLM 回复之前拦截请求：
+        1. 检测消息中的表情包，概率触发入库学习
+        2. 概率注入占位符说明，引导 LLM 生成表情包占位符
         """
-        logger.info(f"被拦截的请求体如下: {req.system_prompt}")
-        ## 循环原始消息获取其中所有的表情包
-        for message_part in event.message_obj.raw_message.message:
-            if message_part.get("type") == "image" and message_part.get("data", {}).get("sub_type") == 1:
-                logger.info(f"找到表情包: {message_part.get('data', {}).get('url')}")
+        meme_config = self.config.get('meme_config', {})
+
+        # 检查表情包功能是否启用
+        if not meme_config.get('meme_available', False):
+            return
+
+        # --- 表情包入库流程 ---
+        learn_probability = meme_config.get('emoji_learn_positive', 0.1)
+        if random.random() < learn_probability:
+            await self._learn_meme_from_message(event, meme_config)
+
+        # --- 占位符注入流程 ---
+        attach_probability = meme_config.get('emoji_attach_positive', 0.7)
+        if random.random() < attach_probability:
+            placeholder_tag = meme_config.get('placeholder_tag', 'meme')
+            req.system_prompt += format_meme_placeholder_injection(placeholder_tag)
+
+    async def _learn_meme_from_message(self, event: AstrMessageEvent, meme_config: Dict):
+        """
+        从消息中学习表情包：检测、下载、调用 LLM 生成描述、入库
+        """
+        try:
+            # 遍历消息组件，查找表情包（sub_type == 1 表示表情包）
+            raw_message = event.message_obj.raw_message
+            if not raw_message or not hasattr(raw_message, 'message'):
+                return
+
+            for message_part in raw_message.message:
+                # 检测表情包类型
+                if isinstance(message_part, dict):
+                    msg_type = message_part.get("type")
+                    msg_data = message_part.get("data", {})
+                    is_emoji = msg_type == "image" and msg_data.get("sub_type") == 1
+                    image_url = msg_data.get("url", "") if is_emoji else ""
+                else:
+                    # 处理对象类型的消息组件
+                    msg_type = getattr(message_part, 'type', None)
+                    msg_data = getattr(message_part, 'data', {})
+                    is_emoji = msg_type == "image" and (getattr(msg_data, 'sub_type', None) == 1 or
+                                                        (isinstance(msg_data, dict) and msg_data.get("sub_type") == 1))
+                    image_url = getattr(msg_data, 'url', '') if is_emoji else ''
+
+                if not is_emoji or not image_url:
+                    continue
+
+                logger.info(f"[Fiscok's][meme] 检测到表情包: {image_url}")
+
+                # 下载图片到临时目录
+                temp_dir = self.data_manager.meme_library_root / 'temp'
+                temp_dir.mkdir(parents=True, exist_ok=True)
+
+                # 生成临时文件名
+                import time
+                temp_filename = f"temp_{int(time.time() * 1000)}.jpg"
+                temp_path = temp_dir / temp_filename
+
+                # 下载图片
+                success = await self._download_image(image_url, temp_path)
+                if not success:
+                    logger.warning(f"[Fiscok's][meme] 下载表情包失败: {image_url}")
+                    continue
+
+                # 调用 LLM 生成描述
+                provider_id = meme_config.get('llm_provider_id', '')
+                description_result = await generate_meme_description(
+                    str(temp_path),
+                    self.context,
+                    provider_id
+                )
+
+                if not description_result:
+                    logger.warning("[Fiscok's][meme] LLM 生成描述失败，跳过入库")
+                    # 清理临时文件
+                    if temp_path.exists():
+                        temp_path.unlink()
+                    continue
+
+                # 添加到表情库
+                source = f"group_{event.get_group_id()}" if event.get_group_id() else "private"
+                meme_id = self.data_manager.add_meme(
+                    image_path=str(temp_path),
+                    description=description_result.get('description', ''),
+                    tags=description_result.get('tags', []),
+                    emotion=description_result.get('emotion', 'funny'),
+                    source=source
+                )
+
+                # 清理临时文件
+                if temp_path.exists():
+                    temp_path.unlink()
+
+                if meme_id:
+                    logger.info(f"[Fiscok's][meme] 成功入库表情包: {meme_id}")
+                else:
+                    logger.warning("[Fiscok's][meme] 表情包入库失败")
+
+        except Exception as e:
+            logger.error(f"[Fiscok's][meme] 学习表情包时出错: {e}", exc_info=True)
+
+    async def _download_image(self, url: str, save_path: Path) -> bool:
+        """
+        下载图片到指定路径
+
+        Args:
+            url: 图片 URL
+            save_path: 保存路径
+
+        Returns:
+            是否成功
+        """
+        try:
+            async with aiohttp.ClientSession(trust_env=True) as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        logger.warning(f"[Fiscok's][meme] 下载图片失败，状态码: {response.status}")
+                        return False
+
+                    async with aiofiles.open(save_path, mode="wb") as f:
+                        async for chunk in response.content.iter_chunked(1024):
+                            await f.write(chunk)
+
+                    return True
+        except Exception as e:
+            logger.error(f"[Fiscok's][meme] 下载图片异常: {e}", exc_info=True)
+            return False
+
+    @filter.on_llm_response()
+    async def on_llm_response_hook(self, event: AstrMessageEvent, resp):
+        """
+        LLM 响应后处理：解析占位符，将表情包图片追加到消息链
+
+        注意：此钩子中不能 yield 发送消息，只能修改 event.get_result().chain
+        """
+        meme_config = self.config.get('meme_config', {})
+        if not meme_config.get('meme_available', False):
+            return
+
+        try:
+            completion_text = resp.completion_text
+            if not completion_text:
+                return
+
+            placeholder_tag = meme_config.get('placeholder_tag', 'meme')
+            # 匹配占位符 [meme:情绪描述]
+            pattern = rf'\[{placeholder_tag}:(.+?)\]'
+            matches = re.findall(pattern, completion_text)
+
+            if not matches:
+                return
+
+            logger.info(f"[Fiscok's][meme] 发现 {len(matches)} 个表情包占位符: {matches}")
+
+            # 为每个占位符查找匹配的表情包
+            for emotion in matches:
+                meme = self.data_manager.find_meme_by_emotion(emotion.strip())
+                if not meme:
+                    logger.info(f"[Fiscok's][meme] 未找到匹配情绪 '{emotion}' 的表情包")
+                    continue
+
+                meme_path = self.data_manager.meme_library_root / meme.get('filename', '')
+                if not meme_path.exists():
+                    logger.warning(f"[Fiscok's][meme] 表情包文件不存在: {meme_path}")
+                    continue
+
+                # 将表情包路径保存到事件的 extra 中，供 on_decorating_result 使用
+                memes_extra = event.get_extra("_memes_to_attach", [])
+                memes_extra.append(str(meme_path))
+                event.set_extra("_memes_to_attach", memes_extra)
+
+                # 从文本中移除占位符
+                clean_text = resp.completion_text.replace(f"[{placeholder_tag}:{emotion}]", "").strip()
+                resp.completion_text = clean_text
+
+                logger.info(f"[Fiscok's][meme] 已标记表情包待发送: {meme_path}")
+
+        except Exception as e:
+            logger.error(f"[Fiscok's][meme] 处理 LLM 响应时出错: {e}", exc_info=True)
+
+    @filter.on_decorating_result()
+    async def on_decorating_result_hook(self, event: AstrMessageEvent):
+        """
+        发送消息前装饰：将表情包图片追加到消息链
+        """
+        memes_paths = event.get_extra("_memes_to_attach", [])
+        if not memes_paths:
+            return
+
+        try:
+            result = event.get_result()
+            if not result or not result.chain:
+                return
+
+            # 将表情包图片追加到消息链
+            for meme_path in memes_paths:
+                path = Path(meme_path)
+                if path.exists():
+                    result.chain.append(Image.fromFileSystem(str(path)))
+                    logger.info(f"[Fiscok's][meme] 已追加表情包到消息链: {meme_path}")
+                else:
+                    logger.warning(f"[Fiscok's][meme] 表情包文件不存在，跳过: {meme_path}")
+
+            # 清除 extra 避免重复发送
+            event.set_extra("_memes_to_attach", [])
+
+        except Exception as e:
+            logger.error(f"[Fiscok's][meme] 装饰消息链时出错: {e}", exc_info=True)
 
     # 临时测试用指令
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -70,7 +279,7 @@ class Core(Star):
         yield event.plain_result("已执行测试指令，检查日志以验证推特")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command('clear_cache_test', alias={'推送测试'})
+    @filter.command('push_cache_test', alias={'推送测试'})
     async def test_command_2(self, event: AstrMessageEvent):
         """
         这是一个测试指令，用于验证推特定时推送功能
@@ -83,7 +292,14 @@ class Core(Star):
     async def bili_video_count(self, event: AstrMessageEvent):
         """
         解析 Bilibili 链接并判断是否在该群聊被发送过
+        仅处理主动发送的消息，忽略引用和转发消息
         """
+        # 检查消息是否包含引用或转发组件
+        if event.message_obj and event.message_obj.message:
+            for component in event.message_obj.message:
+                if isinstance(component, (Reply, Forward)):
+                    return  # 忽略引用和转发消息
+
         bvid = await get_bvid(event)
         group_id = event.get_group_id()
         sender_id = event.get_sender_id()
@@ -146,7 +362,7 @@ class Core(Star):
             message_chain = MessageChain(chain=[forward_node])
 
             for group_id in group_ids:
-                umo = unified_msg_origins[group_id]
+                umo = unified_msg_origins.get(group_id)
                 logger.info(f"[Fiscok's][twitter_push]正在向群 {group_id} 推送 @{twitter_id} 的最新动态")
                 await asyncio.sleep(20)  # 每次推送间隔20秒，避免过于频繁导致消息发送失败
                 res = await self.context.send_message(umo, message_chain)

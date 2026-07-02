@@ -3,6 +3,16 @@
     "describe" : "meme发送/获取相关配置",
     "type" : "object",
     "items" : {
+      "meme_available" : {
+        "describe" : "是否启用表情包功能",
+        "type" : "bool",
+        "default" : false
+      },
+      "meme_cache_size" : {
+        "describe" : "表情包缓存大小，单位为条",
+        "type" : "int",
+        "default" : 200
+      },
       "emoji_learn_positive" : {
         "describe" : "bot偷取群友meme的触发概率",
         "type" : "float",
@@ -12,6 +22,16 @@
         "describe" : "bot发言时携带meme的概率",
         "type" : "float",
         "default" : 0.7
+      },
+      "llm_provider_id" : {
+        "describe" : "用于表情包描述生成的LLM Provider ID（留空则使用默认）",
+        "type" : "string",
+        "default" : ""
+      },
+      "placeholder_tag" : {
+        "describe" : "LLM回复中表情包占位符的标签名",
+        "type" : "string",
+        "default" : "meme"
       }
     }
   },
