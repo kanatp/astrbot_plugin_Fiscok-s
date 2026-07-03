@@ -101,9 +101,6 @@ class Core(Star):
         """
         try:
             raw_message = event.message_obj.raw_message
-            logger.info(f"[Fiscok's][meme][DEBUG] event.message_obj type: {type(event.message_obj)}")
-            logger.info(f"[Fiscok's][meme][DEBUG] raw_message type: {type(raw_message)}")
-            logger.info(f"[Fiscok's][meme][DEBUG] raw_message: {raw_message}")
 
             # 尝试多种方式获取消息组件列表
             message_parts = None
@@ -130,7 +127,7 @@ class Core(Star):
                     msg_data = message_part.get("data", {})
                     is_emoji = msg_type == "image" and msg_data.get("sub_type") == 1
                     image_url = msg_data.get("url", "") if is_emoji else ""
-                    logger.info(f"[Fiscok's][meme][DEBUG] dict组件: type={msg_type}, sub_type={msg_data.get('sub_type')}, is_emoji={is_emoji}")
+                    logger.debug(f"[Fiscok's][meme][DEBUG] dict组件: type={msg_type}, sub_type={msg_data.get('sub_type')}, is_emoji={is_emoji}")
                 else:
                     # 处理对象类型的消息组件
                     msg_type = getattr(message_part, 'type', None)
@@ -151,7 +148,7 @@ class Core(Star):
                             image_url = msg_data.get("url", "")
                         else:
                             image_url = getattr(msg_data, 'url', '') or getattr(message_part, 'url', '')
-                    logger.info(f"[Fiscok's][meme][DEBUG] 对象组件: type={msg_type}, sub_type={sub_type}, is_emoji={is_emoji}, data_type={type(msg_data)}")
+                    logger.debug(f"[Fiscok's][meme][DEBUG] 对象组件: type={msg_type}, sub_type={sub_type}, is_emoji={is_emoji}, data_type={type(msg_data)}")
 
                 if not is_emoji or not image_url:
                     continue
