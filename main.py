@@ -54,31 +54,40 @@ class Core(Star):
         # 启动定时任务
         self.timer.start()
 
-    @filter.on_llm_request()
-    async def on_llm_request_hook(self, event: AstrMessageEvent, req: ProviderRequest):
+    @filter.event_message_type(filter.EventMessageType.ALL_MESSAGE)
+    async def meme_learn_on_message(self, event: AstrMessageEvent):
         """
-        在获取 LLM 回复之前拦截请求：
-        1. 检测消息中的表情包，概率触发入库学习
-        2. 概率注入占位符说明，引导 LLM 生成表情包占位符
+        在每次收到消息时触发表情包偷取判定（与 LLM 请求解耦）
         """
         meme_config = self.config.get('meme_config', {})
-
-        # 检查表情包功能是否启用
         if not meme_config.get('meme_available', False):
             return
 
-        # --- 表情包入库流程 ---
-        # 偷取概率随表情包数量衰减：数量越多，偷取概率越低
+        # 忽略引用和转发消息
+        if event.message_obj and event.message_obj.message:
+            for component in event.message_obj.message:
+                if isinstance(component, (Reply, Forward)):
+                    return
+
+        # 偷取概率随表情包数量衰减
         learn_max = meme_config.get('emoji_learn_max', 0.3)
         learn_min = meme_config.get('emoji_learn_min', 0.02)
         current_count = self.data_manager.get_meme_count()
         max_cache = meme_config.get('meme_cache_size', 200)
-        # 线性衰减：learn_prob = max - (max - min) * (count / max_cache)
         learn_probability = learn_max - (learn_max - learn_min) * min(current_count / max_cache, 1.0)
         learn_probability = max(learn_probability, learn_min)
 
         if random.random() < learn_probability:
             await self._learn_meme_from_message(event, meme_config)
+
+    @filter.on_llm_request()
+    async def on_llm_request_hook(self, event: AstrMessageEvent, req: ProviderRequest):
+        """
+        在获取 LLM 回复之前拦截请求：概率注入占位符说明，引导 LLM 生成表情包占位符
+        """
+        meme_config = self.config.get('meme_config', {})
+        if not meme_config.get('meme_available', False):
+            return
 
         # --- 占位符注入流程 ---
         attach_probability = meme_config.get('emoji_attach_positive', 0.7)
