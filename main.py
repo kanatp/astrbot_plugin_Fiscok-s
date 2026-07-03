@@ -54,7 +54,7 @@ class Core(Star):
         # 启动定时任务
         self.timer.start()
 
-    @filter.event_message_type(filter.EventMessageType.ALL_MESSAGE)
+    @filter.event_message_type(filter.EventMessageType.ALL)
     async def meme_learn_on_message(self, event: AstrMessageEvent):
         """
         在每次收到消息时触发表情包偷取判定（与 LLM 请求解耦）
