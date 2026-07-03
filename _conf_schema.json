@@ -13,10 +13,15 @@
         "type" : "int",
         "default" : 200
       },
-      "emoji_learn_positive" : {
-        "describe" : "bot偷取群友meme的触发概率",
+      "emoji_learn_max" : {
+        "describe" : "bot偷取群友meme的最大概率（表情包数量为0时）",
         "type" : "float",
-        "default" : 0.1
+        "default" : 0.7
+      },
+      "emoji_learn_min" : {
+        "describe" : "bot偷取群友meme的最小概率（表情包数量达到上限时）",
+        "type" : "float",
+        "default" : 0.02
       },
       "emoji_attach_positive" : {
         "describe" : "bot发言时携带meme的概率",

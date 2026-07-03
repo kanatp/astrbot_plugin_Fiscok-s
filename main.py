@@ -68,7 +68,15 @@ class Core(Star):
             return
 
         # --- 表情包入库流程 ---
-        learn_probability = meme_config.get('emoji_learn_positive', 0.1)
+        # 偷取概率随表情包数量衰减：数量越多，偷取概率越低
+        learn_max = meme_config.get('emoji_learn_max', 0.3)
+        learn_min = meme_config.get('emoji_learn_min', 0.02)
+        current_count = self.data_manager.get_meme_count()
+        max_cache = meme_config.get('meme_cache_size', 200)
+        # 线性衰减：learn_prob = max - (max - min) * (count / max_cache)
+        learn_probability = learn_max - (learn_max - learn_min) * min(current_count / max_cache, 1.0)
+        learn_probability = max(learn_probability, learn_min)
+
         if random.random() < learn_probability:
             await self._learn_meme_from_message(event, meme_config)
 
@@ -190,9 +198,7 @@ class Core(Star):
     @filter.on_llm_response()
     async def on_llm_response_hook(self, event: AstrMessageEvent, resp):
         """
-        LLM 响应后处理：解析占位符，将表情包图片追加到消息链
-
-        注意：此钩子中不能 yield 发送消息，只能修改 event.get_result().chain
+        LLM 响应后处理：解析占位符，清理文本和消息链中的占位符，标记待发送的表情包
         """
         meme_config = self.config.get('meme_config', {})
         if not meme_config.get('meme_available', False):
@@ -213,7 +219,9 @@ class Core(Star):
 
             logger.info(f"[Fiscok's][meme] 发现 {len(matches)} 个表情包占位符: {matches}")
 
-            # 为每个占位符查找匹配的表情包
+            memes_to_send = []
+            clean_text = completion_text
+
             for emotion in matches:
                 meme = self.data_manager.find_meme_by_emotion(emotion.strip())
                 if not meme:
@@ -225,16 +233,27 @@ class Core(Star):
                     logger.warning(f"[Fiscok's][meme] 表情包文件不存在: {meme_path}")
                     continue
 
-                # 将表情包路径保存到事件的 extra 中，供 on_decorating_result 使用
-                memes_extra = event.get_extra("_memes_to_attach", [])
-                memes_extra.append(str(meme_path))
-                event.set_extra("_memes_to_attach", memes_extra)
-
+                memes_to_send.append(str(meme_path))
                 # 从文本中移除占位符
-                clean_text = resp.completion_text.replace(f"[{placeholder_tag}:{emotion}]", "").strip()
-                resp.completion_text = clean_text
-
+                clean_text = clean_text.replace(f"[{placeholder_tag}:{emotion}]", "")
                 logger.info(f"[Fiscok's][meme] 已标记表情包待发送: {meme_path}")
+
+            # 清理文本中多余的空行
+            clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+            resp.completion_text = clean_text
+
+            # 同步清理 result_chain 中的 Plain 组件
+            if hasattr(resp, 'result_chain') and resp.result_chain:
+                chain = resp.result_chain.chain if hasattr(resp.result_chain, 'chain') else []
+                for component in chain:
+                    if isinstance(component, Plain):
+                        for emotion in matches:
+                            component.text = component.text.replace(f"[{placeholder_tag}:{emotion}]", "")
+                        component.text = re.sub(r'\n{3,}', '\n\n', component.text).strip()
+
+            # 保存待发送表情包路径到事件 extra
+            if memes_to_send:
+                event.set_extra("_memes_to_attach", memes_to_send)
 
         except Exception as e:
             logger.error(f"[Fiscok's][meme] 处理 LLM 响应时出错: {e}", exc_info=True)
@@ -242,31 +261,49 @@ class Core(Star):
     @filter.on_decorating_result()
     async def on_decorating_result_hook(self, event: AstrMessageEvent):
         """
-        发送消息前装饰：将表情包图片追加到消息链
+        发送消息前装饰：清理消息链中的占位符残留，并延迟单独发送表情包图片
         """
         memes_paths = event.get_extra("_memes_to_attach", [])
         if not memes_paths:
             return
 
         try:
+            # 再次清理消息链中的占位符残留（防御性检查）
             result = event.get_result()
-            if not result or not result.chain:
-                return
+            if result and result.chain:
+                placeholder_tag = self.config.get('meme_config', {}).get('placeholder_tag', 'meme')
+                pattern = rf'\[{placeholder_tag}:.+?\]'
+                for component in result.chain:
+                    if isinstance(component, Plain):
+                        component.text = re.sub(pattern, '', component.text).strip()
+                        component.text = re.sub(r'\n{3,}', '\n\n', component.text).strip()
 
-            # 将表情包图片追加到消息链
+            # 延迟单独发送表情包图片（确保文本消息先到达）
+            umo = event.unified_msg_origin
             for meme_path in memes_paths:
-                path = Path(meme_path)
-                if path.exists():
-                    result.chain.append(Image.fromFileSystem(str(path)))
-                    logger.info(f"[Fiscok's][meme] 已追加表情包到消息链: {meme_path}")
-                else:
-                    logger.warning(f"[Fiscok's][meme] 表情包文件不存在，跳过: {meme_path}")
+                asyncio.create_task(self._send_meme_separately(umo, meme_path))
 
             # 清除 extra 避免重复发送
             event.set_extra("_memes_to_attach", [])
 
         except Exception as e:
             logger.error(f"[Fiscok's][meme] 装饰消息链时出错: {e}", exc_info=True)
+
+    async def _send_meme_separately(self, umo: str, meme_path: str):
+        """
+        延迟发送表情包图片（单独一条消息），确保文本消息先到达
+        """
+        try:
+            await asyncio.sleep(0.5)
+            path = Path(meme_path)
+            if path.exists():
+                chain = MessageChain(chain=[Image.fromFileSystem(str(path))])
+                await self.context.send_message(umo, chain)
+                logger.info(f"[Fiscok's][meme] 已单独发送表情包: {meme_path}")
+            else:
+                logger.warning(f"[Fiscok's][meme] 表情包文件不存在，跳过: {meme_path}")
+        except Exception as e:
+            logger.error(f"[Fiscok's][meme] 单独发送表情包失败: {e}", exc_info=True)
 
     # 临时测试用指令
     @filter.permission_type(filter.PermissionType.ADMIN)

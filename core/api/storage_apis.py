@@ -634,3 +634,7 @@ class DataManager:
             path = self.meme_library_root / meme.get("filename", "")
             return path if path.exists() else None
         return None
+
+    def get_meme_count(self) -> int:
+        """获取当前表情包库中的表情包数量"""
+        return len(self._load_meme_db())
