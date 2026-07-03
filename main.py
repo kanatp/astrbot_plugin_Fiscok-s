@@ -100,49 +100,19 @@ class Core(Star):
         从消息中学习表情包：检测、下载、调用 LLM 生成描述、入库
         """
         try:
-            # ===== 调试日志：打印消息对象完整结构 =====
             raw_message = event.message_obj.raw_message
-            logger.info(f"[Fiscok's][meme][DEBUG] event.message_obj type: {type(event.message_obj)}")
-            logger.info(f"[Fiscok's][meme][DEBUG] raw_message type: {type(raw_message)}")
-            logger.info(f"[Fiscok's][meme][DEBUG] raw_message: {raw_message}")
 
-            # 尝试多种方式获取消息组件列表
+            # 获取消息组件列表
             message_parts = None
-
-            # 方式1: raw_message.message
             if raw_message and hasattr(raw_message, 'message'):
                 message_parts = raw_message.message
-                logger.info(f"[Fiscok's][meme][DEBUG] 来源: raw_message.message, type: {type(message_parts)}, len: {len(message_parts) if message_parts else 0}")
-
-            # 方式2: event.message_obj.message
-            if not message_parts and event.message_obj and hasattr(event.message_obj, 'message'):
+            elif event.message_obj and hasattr(event.message_obj, 'message'):
                 message_parts = event.message_obj.message
-                logger.info(f"[Fiscok's][meme][DEBUG] 来源: event.message_obj.message, type: {type(message_parts)}, len: {len(message_parts) if message_parts else 0}")
-
-            # 方式3: raw_message 本身就是列表
-            if not message_parts and isinstance(raw_message, list):
+            elif isinstance(raw_message, list):
                 message_parts = raw_message
-                logger.info(f"[Fiscok's][meme][DEBUG] 来源: raw_message 本身就是 list, len: {len(message_parts)}")
 
             if not message_parts:
-                logger.warning("[Fiscok's][meme][DEBUG] 无法获取消息组件列表，尝试所有可能的路径均为空")
                 return
-
-            # 打印每个消息组件的详细信息
-            for idx, message_part in enumerate(message_parts):
-                logger.info(f"[Fiscok's][meme][DEBUG] 组件[{idx}] type={type(message_part)}")
-                if isinstance(message_part, dict):
-                    logger.info(f"[Fiscok's][meme][DEBUG] 组件[{idx}] dict内容: {message_part}")
-                else:
-                    # 对象类型，打印所有属性
-                    attrs = {}
-                    for attr in dir(message_part):
-                        if not attr.startswith('_'):
-                            try:
-                                attrs[attr] = getattr(message_part, attr)
-                            except Exception:
-                                pass
-                    logger.info(f"[Fiscok's][meme][DEBUG] 组件[{idx}] 对象属性: {attrs}")
 
             for message_part in message_parts:
                 # 检测表情包类型
@@ -151,9 +121,7 @@ class Core(Star):
                     msg_data = message_part.get("data", {})
                     is_emoji = msg_type == "image" and msg_data.get("sub_type") == 1
                     image_url = msg_data.get("url", "") if is_emoji else ""
-                    logger.info(f"[Fiscok's][meme][DEBUG] dict组件: type={msg_type}, sub_type={msg_data.get('sub_type')}, is_emoji={is_emoji}")
                 else:
-                    # 处理对象类型的消息组件
                     msg_type = getattr(message_part, 'type', None)
                     msg_data = getattr(message_part, 'data', {})
                     sub_type = None
@@ -161,7 +129,6 @@ class Core(Star):
                         sub_type = msg_data.get("sub_type")
                     elif hasattr(msg_data, 'sub_type'):
                         sub_type = getattr(msg_data, 'sub_type', None)
-                    # 也尝试直接从对象获取 sub_type
                     if sub_type is None:
                         sub_type = getattr(message_part, 'sub_type', None)
 
@@ -172,7 +139,6 @@ class Core(Star):
                             image_url = msg_data.get("url", "")
                         else:
                             image_url = getattr(msg_data, 'url', '') or getattr(message_part, 'url', '')
-                    logger.info(f"[Fiscok's][meme][DEBUG] 对象组件: type={msg_type}, sub_type={sub_type}, is_emoji={is_emoji}, data_type={type(msg_data)}")
 
                 if not is_emoji or not image_url:
                     continue
