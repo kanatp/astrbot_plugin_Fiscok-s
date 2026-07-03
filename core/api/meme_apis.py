@@ -54,6 +54,10 @@ async def generate_meme_description(
         # 解析 JSON 响应
         result_text = response.completion_text.strip()
 
+        # 剥离 LLM 特殊标记（如 <|begin_of_box|>...<|end_of_box|>）
+        import re
+        result_text = re.sub(r'<\|[^|]+\|>', '', result_text).strip()
+
         # 尝试提取 JSON 部分（处理可能的 markdown 代码块）
         if result_text.startswith("```"):
             # 移除 markdown 代码块标记
