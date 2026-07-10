@@ -1,25 +1,32 @@
 '''
 Instagram 数据拉取模块
-基于 instaloader 库，提供帖子和快拍的拉取功能
+基于 instaloader 库，通过 cookies 访问帖子和快拍
 '''
 import asyncio
-from typing import List, Dict
+import json
+from pathlib import Path
+from typing import List, Dict, Optional
+
 from astrbot.api import logger
+
 from ..api.storage_apis import DataManager
 
 
-def create_loader(username: str = "", password: str = ""):
+def create_loader(cookies: Dict[str, str]) -> Optional[object]:
     """
-    创建并配置 instaloader 实例
+    通过 cookies 创建 instaloader 实例
 
     Args:
-        username: Instagram 用户名（可选，留空则匿名模式）
-        password: Instagram 密码（可选）
+        cookies: Instagram cookies 字典（sessionid, ds_user_id, csrftoken 等）
 
     Returns:
-        配置好的 Instaloader 实例，登录失败则返回 None
+        配置好的 Instaloader 实例，失败则返回 None
     """
     import instaloader
+
+    if not cookies.get('sessionid'):
+        logger.error("[Fiscok's][instagram_fetch] 缺少 sessionid cookie")
+        return None
 
     loader = instaloader.Instaloader(
         download_pictures=False,
@@ -29,28 +36,12 @@ def create_loader(username: str = "", password: str = ""):
         download_comments=False,
     )
 
-    if username and password:
-        try:
-            loader.load_session_from_file(username)
-            logger.info(f"[Fiscok's][instagram_fetch] 已从文件加载 session: {username}")
-        except FileNotFoundError:
-            logger.info(f"[Fiscok's][instagram_fetch] 未找到 session 文件，尝试密码登录: {username}")
-            try:
-                loader.login(username, password)
-                loader.save_session_to_file()
-                logger.info(f"[Fiscok's][instagram_fetch] 登录成功并已保存 session: {username}")
-            except Exception as e:
-                error_msg = str(e)
-                if "Checkpoint" in error_msg or "checkpoint" in error_msg:
-                    logger.error(
-                        f"[Fiscok's][instagram_fetch] 登录需要安全验证（Checkpoint）。"
-                        f"请在本地机器执行 `instaloader --login={username}` 完成验证，"
-                        f"然后将生成的 session-{username} 文件上传到服务器的 AstrBot 工作目录下，重启插件即可。"
-                    )
-                else:
-                    logger.error(f"[Fiscok's][instagram_fetch] 登录失败: {e}")
-                return None
+    # 设置 cookies
+    for name, value in cookies.items():
+        if value:
+            loader.context._session.cookies.set(name, value, domain='.instagram.com')
 
+    logger.info("[Fiscok's][instagram_fetch] 已通过 cookies 初始化 instaloader")
     return loader
 
 
@@ -107,7 +98,7 @@ def _collect_posts(loader, username: str, manager: DataManager, max_posts: int =
     except instaloader.exceptions.ProfileNotExistsException:
         logger.error(f"[Fiscok's][instagram_fetch] 用户 @{username} 不存在")
     except instaloader.exceptions.LoginRequiredException:
-        logger.error(f"[Fiscok's][instagram_fetch] 拉取 @{username} 的帖子需要登录")
+        logger.error(f"[Fiscok's][instagram_fetch] 拉取 @{username} 的帖子需要登录，请更新 cookies")
     except Exception as e:
         logger.error(f"[Fiscok's][instagram_fetch] 拉取 @{username} 的帖子失败: {e}", exc_info=True)
 
@@ -156,7 +147,7 @@ def _collect_stories(loader, username: str, manager: DataManager) -> List[Dict]:
     except instaloader.exceptions.ProfileNotExistsException:
         logger.error(f"[Fiscok's][instagram_fetch] 用户 @{username} 不存在")
     except instaloader.exceptions.LoginRequiredException:
-        logger.error(f"[Fiscok's][instagram_fetch] 拉取快拍需要登录")
+        logger.error(f"[Fiscok's][instagram_fetch] 拉取快拍需要登录，请更新 cookies")
     except Exception as e:
         logger.error(f"[Fiscok's][instagram_fetch] 拉取 @{username} 的快拍失败: {e}", exc_info=True)
 
@@ -183,13 +174,17 @@ async def fetch_instagram_stories(loader, username: str, manager: DataManager):
         logger.info(f"[Fiscok's][instagram_fetch] 已缓存快拍: {content['shortcode']}")
 
 
-async def check_instagram_login(loader) -> bool:
+async def check_instagram_access(loader) -> bool:
     """
-    检查 Instagram 登录状态
+    检查 Instagram cookies 是否有效
     """
+    import instaloader
+
     def _check():
         try:
-            return loader.context.is_logged_in
+            # 尝试访问一个公开页面来验证 cookies
+            instaloader.Profile.from_username(loader.context, "instagram")
+            return True
         except Exception:
             return False
 

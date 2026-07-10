@@ -1,0 +1,14 @@
+{
+  "twitter": {
+    "auth_token": "",
+    "ct0": ""
+  },
+  "instagram": {
+    "sessionid": "",
+    "ds_user_id": "",
+    "csrftoken": "",
+    "mid": "",
+    "ig_did": "",
+    "rur": ""
+  }
+}

@@ -10,13 +10,14 @@ from .core.api.storage_apis import DataManager
 from .core.api.meme_apis import generate_meme_description
 from .core.prompts import format_meme_placeholder_injection
 from .core.net.twitter_fetch import fetch_twitter_data, check_availability
-from .core.net.instagram_fetch import create_loader, fetch_instagram_posts, fetch_instagram_stories, check_instagram_login
+from .core.net.instagram_fetch import create_loader, fetch_instagram_posts, fetch_instagram_stories, check_instagram_access
 
 import subprocess
 import asyncio
 import random
 import aiohttp
 import aiofiles
+import json
 from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from typing import List, Dict, Any
@@ -52,13 +53,16 @@ class Core(Star):
                 minute=int(time_str.split(":")[1])
             )
 
+        # --- 加载统一 cookie 文件 ---
+        self.cookies_path = Path(self.plugin_data_path) / "cookies.json"
+        self.cookies = self._load_cookies()
+
         # --- Instagram 订阅初始化 ---
         self.ins_loader = None
         ins_config = self.config.get('instagram_subscription_config', {})
         if ins_config.get('instagram_subscription_available', False):
-            ins_username = ins_config.get('instagram_username', '')
-            ins_password = ins_config.get('instagram_password', '')
-            self.ins_loader = create_loader(ins_username, ins_password)
+            ins_cookies = self.cookies.get('instagram', {})
+            self.ins_loader = create_loader(ins_cookies)
             if self.ins_loader:
                 asyncio.create_task(self.instagram_cache_update())
                 for time_str in ins_config.get('instagram_push_time', []):
@@ -70,7 +74,7 @@ class Core(Star):
                     )
                 logger.info("[Fiscok's][instagram] Instagram 订阅功能已初始化")
             else:
-                logger.warning("[Fiscok's][instagram] Instagram 登录失败，订阅功能未启用")
+                logger.warning("[Fiscok's][instagram] Instagram cookies 无效或未配置，订阅功能未启用")
 
         # 启动定时任务
         self.timer.start()
@@ -510,6 +514,10 @@ class Core(Star):
             f.write(f"TWITTER_AUTH_TOKEN={auth_token}\n")
             f.write(f"TWITTER_CT0={ct0}\n")
 
+        # 同步更新统一 cookie 文件
+        self.cookies['twitter'] = {"auth_token": auth_token, "ct0": ct0}
+        self._save_cookies()
+
         subprocess.run(["docker", "restart", "rsshub"])
         logger.info("已更新 Twitter Cookie 并重启 RSSHub，新的订阅推送将在几分钟内生效")
         yield event.plain_result("已更新 Twitter Cookie 并重启 RSSHub，新的订阅推送将在几分钟内生效")
@@ -559,16 +567,17 @@ class Core(Star):
             if not ins_config.get('instagram_subscription_available', False):
                 continue
 
-            # 检查登录状态
-            if not await check_instagram_login(self.ins_loader):
-                logger.warning("[Fiscok's][instagram] Instagram 登录已失效，尝试重新登录")
-                ins_username = ins_config.get('instagram_username', '')
-                ins_password = ins_config.get('instagram_password', '')
-                self.ins_loader = create_loader(ins_username, ins_password)
-                if not self.ins_loader or not await check_instagram_login(self.ins_loader):
-                    logger.error("[Fiscok's][instagram] Instagram 重新登录失败，跳过本次更新")
+            # 检查 cookies 有效性
+            if not await check_instagram_access(self.ins_loader):
+                logger.warning("[Fiscok's][instagram] Instagram cookies 已失效，请更新 cookies.json")
+                # 尝试重新加载 cookies
+                self.cookies = self._load_cookies()
+                ins_cookies = self.cookies.get('instagram', {})
+                self.ins_loader = create_loader(ins_cookies)
+                if not self.ins_loader or not await check_instagram_access(self.ins_loader):
+                    logger.error("[Fiscok's][instagram] Instagram cookies 仍然无效，跳过本次更新")
                     continue
-                logger.info("[Fiscok's][instagram] Instagram 重新登录成功")
+                logger.info("[Fiscok's][instagram] Instagram cookies 已重新加载")
 
             subscriptions = self.data_manager.get_instagram_subscriptions()
             logger.info(f"[Fiscok's][instagram] 正在更新 Instagram 缓存，共 {len(subscriptions)} 个订阅")
@@ -656,35 +665,43 @@ class Core(Star):
         yield event.plain_result(response_message)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @instagram_manager.command('check_login', alias={'检查登录状态'})
-    async def instagram_check_login(self, event: AstrMessageEvent):
+    @instagram_manager.command('check_cookies', alias={'检查cookies'})
+    async def instagram_check_cookies(self, event: AstrMessageEvent):
         if not self.ins_loader:
-            yield event.plain_result("Instagram 功能未启用或登录失败，请先使用 ins管理 login 重新登录")
+            yield event.plain_result("Instagram 功能未启用，请先配置 cookies.json 中的 instagram cookies")
             return
-        status = await check_instagram_login(self.ins_loader)
+        status = await check_instagram_access(self.ins_loader)
         if status:
-            yield event.plain_result("Instagram 登录状态正常")
+            yield event.plain_result("Instagram cookies 有效")
         else:
-            yield event.plain_result("Instagram 未登录或登录已过期，请使用 ins管理 login 重新登录")
+            yield event.plain_result("Instagram cookies 已失效，请更新 cookies.json 中的 instagram cookies")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @instagram_manager.command('login', alias={'登录'})
-    async def instagram_login(self, event: AstrMessageEvent):
-        ins_config = self.config.get('instagram_subscription_config', {})
-        ins_username = ins_config.get('instagram_username', '')
-        ins_password = ins_config.get('instagram_password', '')
-        if not ins_username:
-            yield event.plain_result("未配置 Instagram 用户名，请在配置中填写 instagram_username")
-            return
-        self.ins_loader = create_loader(ins_username, ins_password)
+    @instagram_manager.command('reload_cookies', alias={'重载cookies'})
+    async def instagram_reload_cookies(self, event: AstrMessageEvent):
+        self.cookies = self._load_cookies()
+        ins_cookies = self.cookies.get('instagram', {})
+        self.ins_loader = create_loader(ins_cookies)
         if self.ins_loader:
-            yield event.plain_result(f"Instagram 登录成功: @{ins_username}")
+            yield event.plain_result("Instagram cookies 已重新加载")
         else:
-            yield event.plain_result(
-                f"Instagram 登录失败。如遇 Checkpoint 验证，请在本地执行 "
-                f"`instaloader --login={ins_username}` 完成验证后，"
-                f"将 session-{ins_username} 文件上传到服务器，再执行此命令重试。"
-            )
+            yield event.plain_result("Instagram cookies 加载失败，请检查 cookies.json")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @instagram_manager.command('update_cookies', alias={'更新cookies'})
+    async def instagram_update_cookies(self, event: AstrMessageEvent, sessionid: str, ds_user_id: str, csrftoken: str):
+        """更新 Instagram cookies"""
+        self.cookies['instagram'] = {
+            "sessionid": sessionid,
+            "ds_user_id": ds_user_id,
+            "csrftoken": csrftoken
+        }
+        self._save_cookies()
+        self.ins_loader = create_loader(self.cookies['instagram'])
+        if self.ins_loader:
+            yield event.plain_result("Instagram cookies 已更新")
+        else:
+            yield event.plain_result("Instagram cookies 更新失败")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @instagram_manager.command('trigger_cache_update', alias={'手动缓存更新'})
@@ -708,6 +725,31 @@ class Core(Star):
     async def instagram_trigger_push(self, event: AstrMessageEvent):
         await self.instagram_scheduled_push()
         yield event.plain_result("已手动触发 Instagram 推送，请检查对应群聊以验证推送内容")
+
+    # --- Cookie 管理辅助方法 ---
+    def _load_cookies(self) -> Dict:
+        """加载统一 cookie 文件"""
+        if not self.cookies_path.exists():
+            # 创建默认模板
+            default = {"twitter": {"auth_token": "", "ct0": ""}, "instagram": {}}
+            self._save_cookies(default)
+            return default
+        try:
+            with open(self.cookies_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"[Fiscok's] 加载 cookies.json 失败: {e}")
+            return {"twitter": {}, "instagram": {}}
+
+    def _save_cookies(self, cookies: Dict = None):
+        """保存统一 cookie 文件"""
+        if cookies is None:
+            cookies = self.cookies
+        try:
+            with open(self.cookies_path, 'w', encoding='utf-8') as f:
+                json.dump(cookies, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"[Fiscok's] 保存 cookies.json 失败: {e}")
 
     # --- 插件销毁方法 ---
     async def terminate(self):

@@ -92,16 +92,6 @@
         "type": "bool",
         "default": false
       },
-      "instagram_username": {
-        "describe": "Instagram登录用户名",
-        "type": "string",
-        "default": ""
-      },
-      "instagram_password": {
-        "describe": "Instagram登录密码",
-        "type": "string",
-        "default": ""
-      },
       "instagram_push_time": {
         "describe": "Instagram推送时间",
         "type": "list",
