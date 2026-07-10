@@ -4,9 +4,7 @@ Instagram 数据拉取模块
 '''
 import asyncio
 from typing import List, Dict
-
 from astrbot.api import logger
-
 from ..api.storage_apis import DataManager
 
 
@@ -29,8 +27,6 @@ def create_loader(username: str = "", password: str = ""):
         download_video_thumbnails=False,
         download_geotags=False,
         download_comments=False,
-        save_metadata_json=False,
-        compress_json=False,
     )
 
     if username and password:
