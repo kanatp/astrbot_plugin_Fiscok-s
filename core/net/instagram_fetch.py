@@ -34,13 +34,21 @@ def create_loader(username: str = "", password: str = ""):
             loader.load_session_from_file(username)
             logger.info(f"[Fiscok's][instagram_fetch] 已从文件加载 session: {username}")
         except FileNotFoundError:
-            logger.info(f"[Fiscok's][instagram_fetch] 未找到 session 文件，尝试登录: {username}")
+            logger.info(f"[Fiscok's][instagram_fetch] 未找到 session 文件，尝试密码登录: {username}")
             try:
                 loader.login(username, password)
                 loader.save_session_to_file()
                 logger.info(f"[Fiscok's][instagram_fetch] 登录成功并已保存 session: {username}")
             except Exception as e:
-                logger.error(f"[Fiscok's][instagram_fetch] 登录失败: {e}")
+                error_msg = str(e)
+                if "Checkpoint" in error_msg or "checkpoint" in error_msg:
+                    logger.error(
+                        f"[Fiscok's][instagram_fetch] 登录需要安全验证（Checkpoint）。"
+                        f"请在本地机器执行 `instaloader --login={username}` 完成验证，"
+                        f"然后将生成的 session-{username} 文件上传到服务器的 AstrBot 工作目录下，重启插件即可。"
+                    )
+                else:
+                    logger.error(f"[Fiscok's][instagram_fetch] 登录失败: {e}")
                 return None
 
     return loader

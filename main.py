@@ -659,13 +659,32 @@ class Core(Star):
     @instagram_manager.command('check_login', alias={'检查登录状态'})
     async def instagram_check_login(self, event: AstrMessageEvent):
         if not self.ins_loader:
-            yield event.plain_result("Instagram 功能未启用或登录失败")
+            yield event.plain_result("Instagram 功能未启用或登录失败，请先使用 ins管理 login 重新登录")
             return
         status = await check_instagram_login(self.ins_loader)
         if status:
             yield event.plain_result("Instagram 登录状态正常")
         else:
-            yield event.plain_result("Instagram 未登录或登录已过期，请检查配置中的账号密码")
+            yield event.plain_result("Instagram 未登录或登录已过期，请使用 ins管理 login 重新登录")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @instagram_manager.command('login', alias={'登录'})
+    async def instagram_login(self, event: AstrMessageEvent):
+        ins_config = self.config.get('instagram_subscription_config', {})
+        ins_username = ins_config.get('instagram_username', '')
+        ins_password = ins_config.get('instagram_password', '')
+        if not ins_username:
+            yield event.plain_result("未配置 Instagram 用户名，请在配置中填写 instagram_username")
+            return
+        self.ins_loader = create_loader(ins_username, ins_password)
+        if self.ins_loader:
+            yield event.plain_result(f"Instagram 登录成功: @{ins_username}")
+        else:
+            yield event.plain_result(
+                f"Instagram 登录失败。如遇 Checkpoint 验证，请在本地执行 "
+                f"`instaloader --login={ins_username}` 完成验证后，"
+                f"将 session-{ins_username} 文件上传到服务器，再执行此命令重试。"
+            )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @instagram_manager.command('trigger_cache_update', alias={'手动缓存更新'})
