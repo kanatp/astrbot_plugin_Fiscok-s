@@ -40,12 +40,32 @@ def main():
         print("错误: 缺少 sessionid cookie，请确认已登录 Instagram 后重新导出")
         sys.exit(1)
 
+    print(f"找到 {len(cookies)} 个 Instagram cookie")
+    for name in cookies:
+        print(f"  - {name}")
+
+    # 创建 loader 并设置 cookies
     loader = instaloader.Instaloader()
     for name, value in cookies.items():
         loader.context._session.cookies.set(name, value, domain='.instagram.com')
 
+    # 用 cookies 发起请求验证登录状态
+    print("\n正在验证 session...")
+    try:
+        profile = instaloader.Profile.from_username(loader.context, username)
+        print(f"验证成功！已登录用户: {profile.username}")
+    except instaloader.exceptions.ProfileNotExistsException:
+        print(f"警告: 用户 @{username} 不存在，但 session 可能仍有效")
+    except instaloader.exceptions.LoginRequiredException:
+        print("错误: cookies 已过期或无效，请重新从浏览器导出")
+        sys.exit(1)
+    except Exception as e:
+        print(f"验证请求异常: {e}")
+        print("继续尝试保存 session...")
+
+    # 保存 session
     loader.save_session_to_file(username)
-    print(f"Session 已保存: session-{username}")
+    print(f"\nSession 已保存: session-{username}")
     print("请将此文件上传到服务器的 AstrBot 工作目录下。")
 
 
