@@ -10,6 +10,7 @@ from .core.api.storage_apis import DataManager
 from .core.api.meme_apis import generate_meme_description
 from .core.prompts import format_meme_placeholder_injection
 from .core.net.twitter_fetch import fetch_twitter_data, check_availability
+from .core.net.instagram_fetch import create_loader, fetch_instagram_posts, fetch_instagram_stories, check_instagram_login
 
 import subprocess
 import asyncio
@@ -50,6 +51,26 @@ class Core(Star):
                 hour=int(time_str.split(":")[0]),
                 minute=int(time_str.split(":")[1])
             )
+
+        # --- Instagram 订阅初始化 ---
+        self.ins_loader = None
+        ins_config = self.config.get('instagram_subscription_config', {})
+        if ins_config.get('instagram_subscription_available', False):
+            ins_username = ins_config.get('instagram_username', '')
+            ins_password = ins_config.get('instagram_password', '')
+            self.ins_loader = create_loader(ins_username, ins_password)
+            if self.ins_loader:
+                asyncio.create_task(self.instagram_cache_update())
+                for time_str in ins_config.get('instagram_push_time', []):
+                    self.timer.add_job(
+                        self.instagram_scheduled_push,
+                        'cron',
+                        hour=int(time_str.split(":")[0]),
+                        minute=int(time_str.split(":")[1])
+                    )
+                logger.info("[Fiscok's][instagram] Instagram 订阅功能已初始化")
+            else:
+                logger.warning("[Fiscok's][instagram] Instagram 登录失败，订阅功能未启用")
 
         # 启动定时任务
         self.timer.start()
@@ -396,8 +417,10 @@ class Core(Star):
         定期从 RSSHub 获取订阅的推特账号的最新动态，并更新缓存
         """
         while self.running:
-            await asyncio.sleep(3600)  # 每小时更新一次
-            if self.config.get('twitter_subscription_config', {}).get("twitter_subscription_available"):
+            twitter_config = self.config.get('twitter_subscription_config', {})
+            interval = twitter_config.get("twitter_push_cache_time", 1)
+            await asyncio.sleep(3600 * interval)  # 每小时更新一次
+            if twitter_config.get("twitter_subscription_available"):
                 subscriptions = self.data_manager.get_twitter_subscriptions()
                 logger.info(f"[Fiscok's][twitter_push]正在更新推特缓存")
                 for twitter_id in subscriptions:
@@ -421,7 +444,12 @@ class Core(Star):
             twitter_id = subscription['twitter_id']
             group_ids = subscription['group_ids']
 
-            forward_node = self._quote_info_create(alias, twitter_id)
+            forward_node = self._quote_info_create(
+                alias=alias,
+                account_id=twitter_id,
+                cache_getter=self.data_manager.get_twitter_cache,
+                platform_name="动态"
+            )
             if forward_node is None:
                 logger.info(f"[Fiscok's][twitter_push]未找到 @{twitter_id} 的有效缓存，跳过推送")
                 continue
@@ -519,6 +547,149 @@ class Core(Star):
     def gallery_manager(self):
         pass
 
+    # --- Instagram 缓存更新 ---
+    async def instagram_cache_update(self):
+        """
+        定期拉取订阅的 Instagram 账号的最新内容并更新缓存
+        """
+        while self.running:
+            ins_config = self.config.get('instagram_subscription_config', {})
+            interval = ins_config.get('instagram_fetch_interval', 1)
+            await asyncio.sleep(interval * 3600)
+            if not ins_config.get('instagram_subscription_available', False):
+                continue
+
+            # 检查登录状态
+            if not await check_instagram_login(self.ins_loader):
+                logger.warning("[Fiscok's][instagram] Instagram 登录已失效，尝试重新登录")
+                ins_username = ins_config.get('instagram_username', '')
+                ins_password = ins_config.get('instagram_password', '')
+                self.ins_loader = create_loader(ins_username, ins_password)
+                if not self.ins_loader or not await check_instagram_login(self.ins_loader):
+                    logger.error("[Fiscok's][instagram] Instagram 重新登录失败，跳过本次更新")
+                    continue
+                logger.info("[Fiscok's][instagram] Instagram 重新登录成功")
+
+            subscriptions = self.data_manager.get_instagram_subscriptions()
+            logger.info(f"[Fiscok's][instagram] 正在更新 Instagram 缓存，共 {len(subscriptions)} 个订阅")
+
+            for username in subscriptions:
+                logger.info(f"[Fiscok's][instagram] 正在拉取 @{username} 的最新内容")
+                await asyncio.sleep(180)  # 请求间隔
+                await fetch_instagram_posts(self.ins_loader, username, self.data_manager)
+                if ins_config.get('instagram_fetch_stories', True):
+                    await asyncio.sleep(180)
+                    await fetch_instagram_stories(self.ins_loader, username, self.data_manager)
+
+    # --- Instagram 定时推送 ---
+    async def instagram_scheduled_push(self):
+        """
+        将未推送的 Instagram 缓存推送到对应的群聊
+        """
+        logger.info("[Fiscok's][instagram] 正在执行 Instagram 定时推送任务")
+        subscriptions = self.data_manager.get_all_instagram_subscriptions()
+        unified_msg_origins = self.data_manager.get_instagram_umo()
+
+        for subscription in subscriptions:
+            username = subscription['username']
+            alias = subscription['alias'] if subscription['alias'] else username
+            group_ids = subscription['group_ids']
+
+            forward_node = self._instagram_quote_info_create(alias, username)
+            if forward_node is None:
+                logger.info(f"[Fiscok's][instagram] 未找到 @{username} 的有效缓存，跳过推送")
+                continue
+            message_chain = MessageChain(chain=[forward_node])
+
+            for group_id in group_ids:
+                umo = unified_msg_origins.get(group_id)
+                logger.info(f"[Fiscok's][instagram] 正在向群 {group_id} 推送 @{username} 的最新内容")
+                await asyncio.sleep(20)
+                res = await self.context.send_message(umo, message_chain)
+                logger.info(f"[Fiscok's][instagram] 向群 {group_id} 推送 @{username} 的结果: {res}")
+
+    def _instagram_quote_info_create(self, alias: str, username: str) -> Nodes | None:
+        """
+        构建 Instagram 推送的转发消息
+        """
+        return self._quote_info_create(
+            alias=alias,
+            account_id=username,
+            cache_getter=self.data_manager.get_instagram_cache,
+            platform_name="Instagram 内容",
+            text_fallback=True
+        )
+
+    # --- Instagram 订阅指令组 ---
+    @filter.command_group('instagram_manager', alias={'ins管理'})
+    def instagram_manager(self):
+        pass
+
+    @instagram_manager.command('subscribe', alias={'订阅'})
+    async def instagram_subscribe(self, event: AstrMessageEvent, username: str, alias: str = None):
+        flag = self.data_manager.add_instagram_subscription(
+            event.get_group_id(),
+            username,
+            alias,
+            event.unified_msg_origin
+        )
+        if not flag:
+            yield event.plain_result(f"订阅失败，可能是因为已经订阅了 @{username}，或者数据存储出现问题")
+            return
+        yield event.plain_result(f"已订阅 Instagram 账号 @{username}({alias if alias else '无'})，请等待更新推送")
+
+    @instagram_manager.command('unsubscribe', alias={'取消订阅'})
+    async def instagram_unsubscribe(self, event: AstrMessageEvent, username: str):
+        self.data_manager.remove_instagram_subscription(event.get_group_id(), username)
+        yield event.plain_result(f"已取消 Instagram 订阅 @{username}，不再接收更新推送")
+
+    @instagram_manager.command('list', alias={'订阅列表'})
+    async def instagram_list(self, event: AstrMessageEvent):
+        group_id = event.get_group_id()
+        subscriptions = self.data_manager.get_group_instagram_subscriptions(group_id)
+        if not subscriptions:
+            yield event.plain_result("当前没有订阅任何 Instagram 账号")
+            return
+        response_message = "当前订阅的 Instagram 账号列表：\n"
+        for sub in subscriptions:
+            response_message += f"- @{sub['username']} ({sub['alias'] if sub['alias'] else '无'})\n"
+        yield event.plain_result(response_message)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @instagram_manager.command('check_login', alias={'检查登录状态'})
+    async def instagram_check_login(self, event: AstrMessageEvent):
+        if not self.ins_loader:
+            yield event.plain_result("Instagram 功能未启用或登录失败")
+            return
+        status = await check_instagram_login(self.ins_loader)
+        if status:
+            yield event.plain_result("Instagram 登录状态正常")
+        else:
+            yield event.plain_result("Instagram 未登录或登录已过期，请检查配置中的账号密码")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @instagram_manager.command('trigger_cache_update', alias={'手动缓存更新'})
+    async def instagram_trigger_cache_update(self, event: AstrMessageEvent):
+        if not self.ins_loader:
+            yield event.plain_result("Instagram 功能未启用或登录失败")
+            return
+        ins_config = self.config.get('instagram_subscription_config', {})
+        subscriptions = self.data_manager.get_instagram_subscriptions()
+        logger.info("[Fiscok's][instagram] 手动触发 Instagram 缓存更新")
+        for username in subscriptions:
+            await asyncio.sleep(5)
+            await fetch_instagram_posts(self.ins_loader, username, self.data_manager)
+            if ins_config.get('instagram_fetch_stories', True):
+                await asyncio.sleep(5)
+                await fetch_instagram_stories(self.ins_loader, username, self.data_manager)
+        yield event.plain_result("已手动触发 Instagram 缓存更新，请检查日志以验证更新过程")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @instagram_manager.command('trigger_push', alias={'手动推送'})
+    async def instagram_trigger_push(self, event: AstrMessageEvent):
+        await self.instagram_scheduled_push()
+        yield event.plain_result("已手动触发 Instagram 推送，请检查对应群聊以验证推送内容")
+
     # --- 插件销毁方法 ---
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
@@ -529,7 +700,19 @@ class Core(Star):
         logger.info(f"{self.name} 插件已被卸载/停用，相关资源已清理")
 
     # --- 辅助方法 ---
-    def _quote_info_create(self, alias: str, twitter_id: str) -> Nodes | None:
+    def _quote_info_create(self, alias: str, account_id: str,
+                           cache_getter, platform_name: str = "动态",
+                           text_fallback: bool = False) -> Nodes | None:
+        """
+        通用的转发消息构建方法（推特和 Instagram 共用）
+
+        Args:
+            alias: 显示别名
+            account_id: 账号 ID（twitter_id 或 username）
+            cache_getter: 获取缓存的方法（如 data_manager.get_twitter_cache）
+            platform_name: 平台名称（用于标题文案）
+            text_fallback: 文本为空时是否使用 content_type 作为兜底
+        """
         def _create_node(_text: str, _image_urls: List[str]) -> Node:
             content_list: List[Any] = [Plain(_text)]
             for _url in _image_urls:
@@ -541,19 +724,23 @@ class Core(Star):
                 content=content_list
             )
 
-        caches = self.data_manager.get_twitter_cache(twitter_id)[:10]  # 只取最新的10条动态进行推送
-        if caches is None or len(caches) == 0:
+        caches = cache_getter(account_id)[:10]
+        if not caches:
             return None
 
         nodes = [
             Node(
                 uin=640439951,
                 name="鱼豆腐转发版",
-                content=[Plain(f"{alias} @{twitter_id} 的最新动态，共 {len(caches)} 条")]
+                content=[Plain(f"{alias} @{account_id} 的最新{platform_name}，共 {len(caches)} 条")]
             )
         ]
 
         for cache in caches:
-            nodes.append(_create_node(cache['text'], cache['images']))
+            text = cache.get('text', '')
+            if not text and text_fallback:
+                content_type = cache.get('content_type', 'post')
+                text = f"[{content_type}]"
+            nodes.append(_create_node(text, cache.get('images', [])))
 
         return Nodes(nodes=nodes)

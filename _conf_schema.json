@@ -82,5 +82,50 @@
         "default": 1200
       }
     }
+  },
+  "instagram_subscription_config": {
+    "describe": "Instagram订阅相关配置",
+    "type": "object",
+    "items": {
+      "instagram_subscription_available": {
+        "describe": "是否启用Instagram订阅功能",
+        "type": "bool",
+        "default": false
+      },
+      "instagram_username": {
+        "describe": "Instagram登录用户名",
+        "type": "string",
+        "default": ""
+      },
+      "instagram_password": {
+        "describe": "Instagram登录密码",
+        "type": "string",
+        "default": ""
+      },
+      "instagram_push_time": {
+        "describe": "Instagram推送时间",
+        "type": "list",
+        "default": [
+          "09:00",
+          "15:00",
+          "21:00"
+        ]
+      },
+      "instagram_push_cache_size": {
+        "describe": "Instagram推送缓存大小，单位为条",
+        "type": "int",
+        "default": 50
+      },
+      "instagram_fetch_stories": {
+        "describe": "是否拉取快拍（Stories）",
+        "type": "bool",
+        "default": true
+      },
+      "instagram_fetch_interval": {
+        "describe": "拉取间隔（小时），防止限流",
+        "type": "int",
+        "default": 1
+      }
+    }
   }
 }

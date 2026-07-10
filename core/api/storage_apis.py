@@ -18,6 +18,7 @@ class DataManager:
         self.bili_video_root = self.root / 'bili_videos'
         self.twitter_cache_root = self.root / 'twitter_cache'
         self.meme_library_root = self.root / 'meme_library'
+        self.instagram_cache_root = self.root / 'instagram_cache'
 
         self.config = config
 
@@ -35,12 +36,14 @@ class DataManager:
             self.bili_video_root.mkdir(parents=True, exist_ok=True)
             self.twitter_cache_root.mkdir(parents=True, exist_ok=True)
             self.meme_library_root.mkdir(parents=True, exist_ok=True)
+            self.instagram_cache_root.mkdir(parents=True, exist_ok=True)
 
             logger.info('[DataManager] 已完成数据目录构建]')
         else:
             logger.info('[DataManager] 数据目录已存在')
             # 确保 meme_library 目录存在（兼容旧版本）
             self.meme_library_root.mkdir(parents=True, exist_ok=True)
+            self.instagram_cache_root.mkdir(parents=True, exist_ok=True)
 
     # --- bilibili视频统计基础组件 ---
     def _get_group_file(self, group_id: str) -> Path:
@@ -638,3 +641,296 @@ class DataManager:
     def get_meme_count(self) -> int:
         """获取当前表情包库中的表情包数量"""
         return len(self._load_meme_db())
+
+    # --- Instagram 订阅管理基础组件 ---
+    def _get_instagram_subscription_file(self) -> Path:
+        """获取 Instagram 订阅记录的 JSON 文件路径"""
+        return self.root / "instagram_subscriptions.json"
+
+    def _load_instagram_subscription_record(self) -> List[Dict]:
+        """读取 Instagram 订阅记录"""
+        file = self._get_instagram_subscription_file()
+        if not file.exists():
+            return []
+        with open(file, 'r', encoding='utf-8') as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                logger.error(f"[DataManager] 解析 Instagram 订阅记录失败: {file}")
+                return []
+
+    def _save_instagram_subscription_record(self, record: List[Dict]):
+        """将 Instagram 订阅记录写回 JSON 文件"""
+        file = self._get_instagram_subscription_file()
+        with open(file, 'w', encoding='utf-8') as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+
+    def _get_instagram_umo_record(self) -> Path:
+        """获取 Instagram UMO 记录文件路径"""
+        return self.root / "instagram_umo_record.json"
+
+    def _load_instagram_umo_record(self) -> Dict[str, str]:
+        """读取 Instagram UMO 记录"""
+        file = self._get_instagram_umo_record()
+        if not file.exists():
+            return {}
+        with open(file, 'r', encoding='utf-8') as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                logger.error(f"[DataManager] 解析 Instagram UMO 记录失败: {file}")
+                return {}
+
+    def _save_instagram_umo_record(self, record: Dict[str, str]):
+        """将 Instagram UMO 记录写回 JSON 文件"""
+        file = self._get_instagram_umo_record()
+        with open(file, 'w', encoding='utf-8') as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+
+    # --- Instagram 订阅管理核心接口 ---
+    def add_instagram_subscription(self, group_id: str, username: str, alias: str, umo: str) -> bool:
+        """
+        添加 Instagram 订阅记录
+        """
+        record = self._load_instagram_subscription_record()
+        umo_dict = self._load_instagram_umo_record()
+
+        if group_id not in umo_dict:
+            umo_dict[group_id] = umo
+
+        if username not in self.get_instagram_subscriptions():
+            record.append({
+                "username": username,
+                "alias": alias,
+                "group_ids": [group_id],
+            })
+            logger.info(f"[DataManager] 已创建 Instagram 订阅: group_id({group_id}) 添加订阅 @{username}")
+        else:
+            for entry in record:
+                if entry.get("username") == username:
+                    if group_id not in entry.get("group_ids", []):
+                        entry.get("group_ids", []).append(group_id)
+                        logger.info(f"[DataManager] 已添加 Instagram 订阅: group_id({group_id}) 添加订阅 @{username}")
+                        break
+                    else:
+                        logger.warning(f"[DataManager] 添加 Instagram 订阅失败: group_id({group_id}) 已订阅 @{username}")
+                        return False
+
+        self._save_instagram_subscription_record(record)
+        self._save_instagram_umo_record(umo_dict)
+        return True
+
+    def remove_instagram_subscription(self, group_id: str, username: str):
+        """
+        移除 Instagram 订阅记录
+        """
+        record = self._load_instagram_subscription_record()
+        for entry in record:
+            if entry.get("username") == username:
+                if group_id in entry.get("group_ids", []):
+                    entry.get("group_ids", []).remove(group_id)
+                    logger.info(f"[DataManager] 已移除 Instagram 订阅: group_id({group_id}) 取消订阅 @{username}")
+                    if not entry.get("group_ids"):
+                        record.remove(entry)
+                        logger.info(f"[DataManager] 已删除 Instagram 订阅: @{username} 因为没有任何群聊订阅了它")
+                else:
+                    logger.warning(f"[DataManager] 移除 Instagram 订阅失败: group_id({group_id}) 未订阅 @{username}")
+                break
+
+        self._save_instagram_subscription_record(record)
+
+    def get_instagram_subscriptions(self) -> List[str]:
+        """获取所有订阅的 Instagram 用户名列表"""
+        record = self._load_instagram_subscription_record()
+        return [entry.get("username") for entry in record if entry.get("username")]
+
+    def get_all_instagram_subscriptions(self) -> List[Dict]:
+        """获取完整的 Instagram 订阅记录列表"""
+        return self._load_instagram_subscription_record()
+
+    def get_group_instagram_subscriptions(self, group_id: str) -> List[Dict]:
+        """获取指定群组的 Instagram 订阅列表"""
+        record = self._load_instagram_subscription_record()
+        subscriptions = []
+        for entry in record:
+            if entry.get("group_ids") and group_id in entry.get("group_ids"):
+                subscriptions.append({
+                    "username": entry.get("username"),
+                    "alias": entry.get("alias"),
+                })
+        return subscriptions
+
+    def get_instagram_umo(self) -> Dict[str, str]:
+        """获取 Instagram 的 group_id -> UMO 映射"""
+        return self._load_instagram_umo_record()
+
+    # --- Instagram 缓存管理基础组件 ---
+    def _get_instagram_cache_list(self, username: str) -> Path:
+        """获取指定用户的 Instagram 缓存索引文件路径"""
+        return self.instagram_cache_root / f"{username}.json"
+
+    def _load_instagram_cache_list(self, username: str) -> List[Dict]:
+        """读取指定用户的 Instagram 缓存索引"""
+        file = self._get_instagram_cache_list(username)
+        if not file.exists():
+            return []
+        with open(file, 'r', encoding='utf-8') as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                logger.error(f"[DataManager] 解析 Instagram 缓存索引失败: {file}")
+                return []
+
+    def _save_instagram_cache_list(self, username: str, cache_list: List[Dict]):
+        """将指定用户的 Instagram 缓存索引写回 JSON 文件"""
+        file = self._get_instagram_cache_list(username)
+        cache_list.sort(key=lambda x: x.get("timestamp", ""))
+        with open(file, 'w', encoding='utf-8') as f:
+            json.dump(cache_list, f, ensure_ascii=False, indent=2)
+
+    def _get_instagram_push_record(self) -> Path:
+        """获取 Instagram 推送记录文件路径"""
+        return self.instagram_cache_root / "push_record.json"
+
+    def _load_instagram_push_record(self) -> Dict:
+        """读取 Instagram 推送记录"""
+        file = self._get_instagram_push_record()
+        if not file.exists():
+            return {}
+        with open(file, 'r', encoding='utf-8') as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+
+    def _save_instagram_push_record(self, record: Dict):
+        """将 Instagram 推送记录写回 JSON 文件"""
+        file = self._get_instagram_push_record()
+        with open(file, 'w', encoding='utf-8') as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+
+    # --- Instagram 缓存管理核心接口 ---
+    def instagram_cache_in_storage(self, username: str, shortcode: str) -> bool:
+        """检查指定 shortcode 的 Instagram 内容是否已缓存"""
+        return (self.instagram_cache_root / username / shortcode).exists()
+
+    async def update_instagram_cache(self, content: Dict):
+        """
+        缓存 Instagram 内容（帖子或快拍）
+        """
+        username = content.get("username")
+        shortcode = content.get("shortcode")
+        if not username or not shortcode:
+            logger.warning(f"[DataManager] 缺少 username 或 shortcode，无法缓存: {content}")
+            return
+
+        # 创建缓存目录
+        dir_path = self.instagram_cache_root / username / shortcode
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+        # 下载图片
+        image_urls = content.get("images", [])
+        local_image_paths = []
+        if image_urls:
+            local_image_paths = await self._instagram_image_download(username, shortcode, image_urls)
+
+        for idx, path in enumerate(local_image_paths):
+            local_image_paths[idx] = str(path) if path else None
+
+        # 写入内容文件
+        output = {
+            "username": username,
+            "shortcode": shortcode,
+            "content_type": content.get("content_type", "post"),
+            "text": content.get("text", ""),
+            "images": local_image_paths,
+            "timestamp": content.get("timestamp"),
+            "likes": content.get("likes"),
+        }
+        content_path = dir_path / "content.txt"
+        with open(content_path, 'w', encoding='utf-8') as f:
+            json.dump(output, f, ensure_ascii=False, indent=2)
+
+        # 更新缓存索引
+        cache_list = self._load_instagram_cache_list(username)
+        cache_list.append({
+            "shortcode": shortcode,
+            "timestamp": content.get("timestamp"),
+        })
+
+        # 缓存大小限制
+        max_cache = self.config.get('instagram_subscription_config', {}).get("instagram_push_cache_size", 50)
+        if len(cache_list) > max_cache:
+            cache_list.sort(key=lambda x: x.get("timestamp", ""))
+            to_remove = cache_list[:-max_cache]
+            for item in to_remove:
+                remove_path = self.instagram_cache_root / username / item["shortcode"]
+                if remove_path.exists():
+                    for child in remove_path.iterdir():
+                        child.unlink()
+                    remove_path.rmdir()
+                    logger.info(f"[DataManager] 已淘汰过期 Instagram 缓存: {remove_path}")
+            cache_list = cache_list[-max_cache:]
+        self._save_instagram_cache_list(username, cache_list)
+
+        logger.info(f"[DataManager] 已缓存 Instagram 内容: @{username}/{shortcode}")
+
+    async def _instagram_image_download(self, username: str, shortcode: str, image_urls: List[str]) -> List[Path]:
+        """下载 Instagram 图片"""
+        import aiohttp
+        import aiofiles
+
+        save_dir = self.instagram_cache_root / username / shortcode
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        async def download_image(session: aiohttp.ClientSession, url: str, path: Path):
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    async with aiofiles.open(path, mode="wb") as f:
+                        async for chunk in resp.content.iter_chunked(1024):
+                            await f.write(chunk)
+
+        local_paths = []
+        async with aiohttp.ClientSession(trust_env=True) as session:
+            tasks = []
+            for idx, url in enumerate(image_urls):
+                ext = self._get_image_extension(url)
+                filename = f"{shortcode}_{idx}{ext}"
+                path = save_dir / filename
+                local_paths.append(path)
+                tasks.append(asyncio.create_task(download_image(session, url, path)))
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for idx, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"[DataManager] 下载 Instagram 图片失败: {result}")
+                    local_paths[idx] = None
+
+        return local_paths
+
+    def get_instagram_cache(self, username: str) -> List[Dict]:
+        """
+        获取指定用户未推送的 Instagram 缓存内容
+        """
+        cache_list = self._load_instagram_cache_list(username)
+        push_record = self._load_instagram_push_record()
+
+        result = []
+        for item in cache_list:
+            shortcode = item.get("shortcode")
+            if shortcode and shortcode not in push_record.get("record_list", []):
+                content_path = self.instagram_cache_root / username / shortcode / "content.txt"
+                if content_path.exists():
+                    with open(content_path, 'r', encoding='utf-8') as f:
+                        try:
+                            result.append(json.load(f))
+                        except json.JSONDecodeError:
+                            logger.error(f"[DataManager] 解析 Instagram 缓存内容失败: {content_path}")
+
+                push_record.setdefault("record_list", []).append(shortcode)
+
+        push_record["last_push"] = datetime.now().isoformat()
+        self._save_instagram_push_record(push_record)
+
+        result.sort(key=lambda x: x.get("timestamp", ""))
+        return result
