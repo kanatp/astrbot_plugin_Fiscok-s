@@ -209,3 +209,4 @@ __marimo__/
 /core/net/data/t2i_templates/base.html
 /core/net/data/cmd_config.json
 tool/cookies.txt
+tool/cookies.json
