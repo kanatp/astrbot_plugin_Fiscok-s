@@ -39,7 +39,7 @@ def create_loader(cookies: Dict[str, str]) -> Optional[object]:
     # 设置 cookies
     for name, value in cookies.items():
         if value:
-            loader.context._session.cookies.set(name, value, domain='.instagram.com')
+            loader.context._session.cookies.set(name, value)
 
     logger.info("[Fiscok's][instagram_fetch] 已通过 cookies 初始化 instaloader")
     return loader
