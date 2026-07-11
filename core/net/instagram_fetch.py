@@ -17,7 +17,7 @@ def create_loader(cookies: Dict[str, str]) -> Optional[object]:
     通过 cookies 创建 instaloader 实例
 
     Args:
-        cookies: Instagram cookies 字典（sessionid, ds_user_id, csrftoken 等）
+        cookies: Instagram cookies 字典（{name: value} 格式）
 
     Returns:
         配置好的 Instaloader 实例，失败则返回 None
@@ -34,12 +34,14 @@ def create_loader(cookies: Dict[str, str]) -> Optional[object]:
         download_video_thumbnails=False,
         download_geotags=False,
         download_comments=False,
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     )
 
-    # 设置 cookies
+    # 设置 cookies 到两个域名
     for name, value in cookies.items():
         if value:
-            loader.context._session.cookies.set(name, value)
+            loader.context._session.cookies.set(name, value, domain='.instagram.com')
+            loader.context._session.cookies.set(name, value, domain='www.instagram.com')
 
     logger.info("[Fiscok's][instagram_fetch] 已通过 cookies 初始化 instaloader")
     return loader
@@ -55,6 +57,12 @@ def _collect_posts(loader, username: str, manager: DataManager, max_posts: int =
     try:
         profile = instaloader.Profile.from_username(loader.context, username)
         logger.info(f"[Fiscok's][instagram_fetch] 正在拉取 @{username} 的帖子，粉丝数: {profile.followers}")
+
+        # 调试：检查 profile 的内部数据结构
+        logger.info(f"[Fiscok's][instagram_fetch] profile._node keys: {list(profile._node.keys()) if hasattr(profile, '_node') else 'N/A'}")
+        if hasattr(profile, '_node') and 'edge_owner_to_timeline_media' in profile._node:
+            media_data = profile._node['edge_owner_to_timeline_media']
+            logger.info(f"[Fiscok's][instagram_fetch] media_data keys: {list(media_data.keys()) if isinstance(media_data, dict) else type(media_data)}")
 
         count = 0
         for post in profile.get_posts():
@@ -99,6 +107,14 @@ def _collect_posts(loader, username: str, manager: DataManager, max_posts: int =
         logger.error(f"[Fiscok's][instagram_fetch] 用户 @{username} 不存在")
     except instaloader.exceptions.LoginRequiredException:
         logger.error(f"[Fiscok's][instagram_fetch] 拉取 @{username} 的帖子需要登录，请更新 cookies")
+    except KeyError as e:
+        logger.error(f"[Fiscok's][instagram_fetch] 拉取 @{username} 的帖子失败: KeyError {e}")
+        # 尝试获取更多调试信息
+        try:
+            if hasattr(profile, '_node'):
+                logger.error(f"[Fiscok's][instagram_fetch] profile._node 完整内容: {json.dumps(profile._node, ensure_ascii=False, indent=2)}")
+        except Exception as debug_e:
+            logger.error(f"[Fiscok's][instagram_fetch] 获取调试信息失败: {debug_e}")
     except Exception as e:
         logger.error(f"[Fiscok's][instagram_fetch] 拉取 @{username} 的帖子失败: {e}", exc_info=True)
 
