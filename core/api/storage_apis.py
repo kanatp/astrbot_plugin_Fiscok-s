@@ -19,6 +19,7 @@ class DataManager:
         self.twitter_cache_root = self.root / 'twitter_cache'
         self.meme_library_root = self.root / 'meme_library'
         self.instagram_cache_root = self.root / 'instagram_cache'
+        self.affinity_root = self.root / 'affinity'
 
         self.config = config
 
@@ -37,6 +38,7 @@ class DataManager:
             self.twitter_cache_root.mkdir(parents=True, exist_ok=True)
             self.meme_library_root.mkdir(parents=True, exist_ok=True)
             self.instagram_cache_root.mkdir(parents=True, exist_ok=True)
+            self.affinity_root.mkdir(parents=True, exist_ok=True)
 
             logger.info('[DataManager] 已完成数据目录构建]')
         else:
@@ -44,6 +46,7 @@ class DataManager:
             # 确保 meme_library 目录存在（兼容旧版本）
             self.meme_library_root.mkdir(parents=True, exist_ok=True)
             self.instagram_cache_root.mkdir(parents=True, exist_ok=True)
+            self.affinity_root.mkdir(parents=True, exist_ok=True)
 
     # --- bilibili视频统计基础组件 ---
     def _get_group_file(self, group_id: str) -> Path:
@@ -641,6 +644,104 @@ class DataManager:
     def get_meme_count(self) -> int:
         """获取当前表情包库中的表情包数量"""
         return len(self._load_meme_db())
+
+    # --- 好感度/情绪存储基础组件 ---
+    def _get_affinity_file(self) -> Path:
+        """获取好感度/情绪数据库的 JSON 文件路径"""
+        return self.affinity_root / 'affinity_db.json'
+
+    def _load_affinity_db(self) -> Dict:
+        """读取好感度/情绪数据库，文件不存在或损坏则返回空字典"""
+        file = self._get_affinity_file()
+        if not file.exists():
+            return {}
+        try:
+            with open(file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            logger.error(f"[Fiscok's][DataManager][_load_affinity_db]解析好感度数据库失败，文件可能损坏: {file}")
+            return {}
+
+    def _save_affinity_db(self, db: Dict):
+        """将好感度/情绪数据库写回 JSON 文件"""
+        file = self._get_affinity_file()
+        with open(file, 'w', encoding='utf-8') as f:
+            json.dump(db, f, ensure_ascii=False, indent=2)
+
+    def _init_affinity_record(self, user_id: str, nickname: str) -> Dict:
+        """构造新用户的好感度记录（初始值从配置读取，默认 50）"""
+        init_value = int(self.config.get('emotion_config', {}).get('affinity_init', 50))
+        return {
+            "affinity": init_value,
+            "nickname": nickname,
+            "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    # --- 好感度核心接口 ---
+    def get_user_affinity(self, user_id: str, nickname: str = "") -> int:
+        """
+        获取用户好感度。新用户自动初始化为初始值（默认 50）并持久化。
+
+        :param user_id: 用户 ID（QQ 账号等稳定标识）
+        :param nickname: 用户昵称
+        :return: 好感度值
+        """
+        try:
+            db = self._load_affinity_db()
+            record = db.get(user_id)
+            if not record:
+                record = self._init_affinity_record(user_id, nickname)
+                db[user_id] = record
+                self._save_affinity_db(db)
+                logger.info(f"[DataManager] 已为新用户 {user_id} 初始化好感度 {record['affinity']}")
+            elif nickname and record.get("nickname") != nickname:
+                record["nickname"] = nickname
+                self._save_affinity_db(db)
+            return int(record.get("affinity", 50))
+        except Exception as e:
+            logger.error(f"[DataManager] 获取用户好感度失败: {e}", exc_info=True)
+            return int(self.config.get('emotion_config', {}).get('affinity_init', 50))
+
+    def update_user_affinity(
+        self,
+        user_id: str,
+        affinity_delta: int = 0,
+        nickname: str = "",
+        min_: int = 0,
+        max_: int = 100,
+    ) -> Dict:
+        """
+        更新模型对该用户的好感度（拟人化处理），并持久化。
+
+        :param user_id: 用户 ID（QQ 账号等稳定标识）
+        :param affinity_delta: 好感度变化值
+        :param nickname: 用户昵称
+        :param min_: 值下限
+        :param max_: 值上限
+        :return: {"affinity": int}
+        """
+        try:
+            db = self._load_affinity_db()
+            record = db.get(user_id)
+            if not record:
+                record = self._init_affinity_record(user_id, nickname)
+            elif nickname:
+                record["nickname"] = nickname
+
+            new_affinity = int(record.get("affinity", 50)) + int(affinity_delta)
+            record["affinity"] = max(min_, min(max_, new_affinity))
+            record["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            db[user_id] = record
+            self._save_affinity_db(db)
+            logger.info(
+                f"[DataManager] 更新用户 {user_id} 好感度: "
+                f"affinity={record['affinity']}(+{affinity_delta})"
+            )
+            return {"affinity": record["affinity"]}
+        except Exception as e:
+            logger.error(f"[DataManager] 更新用户好感度失败: {e}", exc_info=True)
+            return {"affinity": int(self.config.get('emotion_config', {}).get('affinity_init', 50))}
 
     # --- Instagram 订阅管理基础组件 ---
     def _get_instagram_subscription_file(self) -> Path:

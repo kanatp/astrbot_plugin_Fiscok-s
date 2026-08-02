@@ -8,7 +8,8 @@ from astrbot.api.message_components import Node, Plain, Image, Nodes, Reply, For
 from .core.api.bili_apis import get_bvid
 from .core.api.storage_apis import DataManager
 from .core.api.meme_apis import generate_meme_description
-from .core.prompts import format_meme_placeholder_injection
+from .core.api.emotion_apis import analyze_emotion_state
+from .core.prompts import format_meme_placeholder_injection, format_emotion_state_injection
 from .core.net.twitter_fetch import fetch_twitter_data, check_availability
 from .core.net.instagram_fetch import create_loader, fetch_instagram_posts, fetch_instagram_stories, check_instagram_access
 
@@ -32,6 +33,9 @@ class Core(Star):
         self.config = config
         self.plugin_data_path = get_astrbot_data_path() + "/plugin_data/" + self.name
         self.data_manager = DataManager(self.plugin_data_path, config)
+
+        # 模型自身的全局情绪状态（运行时变量，文字描述，不持久化）
+        self.current_emotion = str(config.get('emotion_config', {}).get('emotion_init', '平静'))
 
         self.rssHub_base_url = self.config.get('twitter_subscription_config', {}).get("rssHub_url", "")
         self.rssHub_port = self.config.get('twitter_subscription_config', {}).get("rssHub_port", 1200)
@@ -105,6 +109,24 @@ class Core(Star):
         if random.random() < learn_probability:
             await self._learn_meme_from_message(event, meme_config)
 
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def ensure_user_affinity_on_message(self, event: AstrMessageEvent):
+        """
+        在每次收到消息时确保该用户的好感度记录已初始化（新用户从初始值开始，默认 50）
+        """
+        emotion_config = self.config.get('emotion_config', {})
+        if not emotion_config.get('available', False):
+            return
+
+        sender_id = event.get_sender_id()
+        if not sender_id or sender_id == event.get_self_id():
+            return
+
+        try:
+            self.data_manager.get_user_affinity(sender_id, event.get_sender_name())
+        except Exception as e:
+            logger.warning(f"[Fiscok's][emotion] 初始化用户好感度失败: {e}")
+
     @filter.on_llm_request()
     async def on_llm_request_hook(self, event: AstrMessageEvent, req: ProviderRequest):
         """
@@ -119,6 +141,56 @@ class Core(Star):
         if random.random() < attach_probability:
             placeholder_tag = meme_config.get('placeholder_tag', 'meme')
             req.system_prompt += format_meme_placeholder_injection(placeholder_tag)
+
+    @filter.on_llm_request()
+    async def on_llm_request_emotion_hook(self, event: AstrMessageEvent, req: ProviderRequest):
+        """
+        在 LLM 请求阶段阻塞式调用高温度情绪模型：
+        更新模型全局情绪（文字，运行时变量）与对当前用户的好感度（数值，持久化），并注入主 LLM 上下文
+        """
+        emotion_config = self.config.get('emotion_config', {})
+        if not emotion_config.get('available', False):
+            return
+
+        sender_id = event.get_sender_id()
+        if not sender_id or sender_id == event.get_self_id():
+            return
+
+        try:
+            nickname = event.get_sender_name()
+            result = await analyze_emotion_state(
+                self.context,
+                provider_id=emotion_config.get('llm_provider_id', ''),
+                nickname=nickname,
+                message=event.message_str,
+                current_emotion=self.current_emotion,
+                temperature=emotion_config.get('temperature', 1.2),
+                delta_max=emotion_config.get('delta_max', 5),
+            )
+            if not result:
+                return
+
+            # 更新模型全局情绪（文字描述），变化已在 emotion_apis 日志中说明
+            new_emotion = result.get('emotion', '')
+            if new_emotion:
+                self.current_emotion = new_emotion
+
+            # 更新该用户好感度（数值，JSON 持久化）
+            new_state = self.data_manager.update_user_affinity(
+                sender_id,
+                affinity_delta=result.get('affinity_delta', 0),
+                nickname=nickname,
+                min_=emotion_config.get('affinity_min', 0),
+                max_=emotion_config.get('affinity_max', 100),
+            )
+            injection = format_emotion_state_injection(
+                nickname,
+                self.current_emotion,
+                new_state.get('affinity', 50),
+            )
+            req.system_prompt = f"{req.system_prompt or ''}\n{injection}"
+        except Exception as e:
+            logger.warning(f"[Fiscok's][emotion] 情绪/好感度分析失败，不影响主请求: {e}")
 
     async def _learn_meme_from_message(self, event: AstrMessageEvent, meme_config: Dict):
         """
@@ -342,6 +414,54 @@ class Core(Star):
 
         except Exception as e:
             logger.error(f"[Fiscok's][meme] 装饰消息链时出错: {e}", exc_info=True)
+
+    @filter.on_decorating_result()
+    async def on_decorating_result_split_hook(self, event: AstrMessageEvent):
+        """
+        发送前将 LLM 回复按换行符拆分为多条消息分别发送（跳过空白行）
+        定义在表情包装饰钩子之后，确保先清理占位符再拆分
+        """
+        segmented_config = self.config.get('segmented_parser_config', {})
+        if not segmented_config.get('available', False):
+            return
+
+        result = event.get_result()
+        if result is None or not result.is_model_result():
+            return
+
+        # 收集文本段（按换行拆分、跳过空白行）与非文本组件
+        plain_segments = []
+        other_comps = []
+        if result.chain:
+            for component in result.chain:
+                if isinstance(component, Plain):
+                    for line in component.text.split("\n"):
+                        line = line.strip()
+                        if line:
+                            plain_segments.append(line)
+                else:
+                    other_comps.append(component)
+
+        if len(plain_segments) + len(other_comps) <= 1:
+            return
+
+        try:
+            umo = event.unified_msg_origin
+            # 先发送非文本组件（如图片/表情包）
+            if other_comps:
+                await self.context.send_message(umo, MessageChain(chain=other_comps))
+
+            # 再逐行发送文本
+            send_interval = segmented_config.get('send_interval', 0.5)
+            for line in plain_segments:
+                await self.context.send_message(umo, MessageChain(chain=[Plain(line)]))
+                if send_interval > 0:
+                    await asyncio.sleep(send_interval)
+
+            # 原消息链不再重复发送
+            event.clear_result()
+        except Exception as e:
+            logger.error(f"[Fiscok's][segmented] 分段发送失败: {e}", exc_info=True)
 
     async def _send_meme_separately(self, umo: str, meme_path: str):
         """

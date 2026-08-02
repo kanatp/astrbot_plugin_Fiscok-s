@@ -42,6 +42,70 @@
       }
     }
   },
+  "segmented_parser_config": {
+    "describe": "LLM回复换行分段解析器配置",
+    "type": "object",
+    "items": {
+      "available": {
+        "describe": "是否启用换行分段解析器",
+        "type": "bool",
+        "default": false
+      },
+      "send_interval": {
+        "describe": "分段消息之间的发送间隔（秒）",
+        "type": "float",
+        "default": 0.5
+      }
+    }
+  },
+  "emotion_config": {
+    "describe": "情绪与好感度系统配置",
+    "type": "object",
+    "items": {
+      "available": {
+        "describe": "是否启用情绪与好感度系统",
+        "type": "bool",
+        "default": false
+      },
+      "llm_provider_id": {
+        "describe": "用于情绪/好感度分析的LLM Provider（高温度）",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空时使用第一个可用的模型"
+      },
+      "temperature": {
+        "describe": "情绪分析模型的温度（高温度设置）",
+        "type": "float",
+        "default": 1.2
+      },
+      "emotion_init": {
+        "describe": "模型全局情绪的初始状态（文字描述）",
+        "type": "string",
+        "default": "平静"
+      },
+      "affinity_init": {
+        "describe": "新用户好感度初始值",
+        "type": "int",
+        "default": 50
+      },
+      "affinity_min": {
+        "describe": "好感度值下限",
+        "type": "int",
+        "default": 0
+      },
+      "affinity_max": {
+        "describe": "好感度值上限",
+        "type": "int",
+        "default": 100
+      },
+      "delta_max": {
+        "describe": "单次好感度变化值绝对值上限",
+        "type": "int",
+        "default": 5
+      }
+    }
+  },
   "twitter_subscription_config": {
     "describe": "twitter订阅相关配置",
     "type": "object",
