@@ -23,8 +23,8 @@ class DataManager:
 
         self.config = config
 
-        if not self.root.exists():
-            self.create_folder(self)
+        # 初始化数据目录（无论是否首次运行，确保所有子目录存在）
+        self.create_folder()
 
     def create_folder(self):
         """
@@ -665,6 +665,7 @@ class DataManager:
     def _save_affinity_db(self, db: Dict):
         """将好感度/情绪数据库写回 JSON 文件"""
         file = self._get_affinity_file()
+        file.parent.mkdir(parents=True, exist_ok=True)
         with open(file, 'w', encoding='utf-8') as f:
             json.dump(db, f, ensure_ascii=False, indent=2)
 
