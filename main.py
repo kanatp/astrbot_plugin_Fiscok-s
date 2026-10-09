@@ -594,13 +594,25 @@ class Core(Star):
             twitter_config = self.config.get('twitter_subscription_config', {})
             interval = twitter_config.get("twitter_push_cache_time", 1)
             await asyncio.sleep(3600 * interval)  # 每小时更新一次
-            if twitter_config.get("twitter_subscription_available"):
-                subscriptions = self.data_manager.get_twitter_subscriptions()
-                logger.info(f"[Fiscok's][twitter_push]正在更新推特缓存")
-                for twitter_id in subscriptions:
-                    logger.info(f"[Fiscok's][twitter_push]正在拉取推特账号 @{twitter_id} 的最新动态")
-                    await asyncio.sleep(180) # 每次请求间隔3分钟，避免过于频繁导致推特账号异常
-                    await fetch_twitter_data(twitter_id, self.data_manager, self.rssHub_full_url)
+            if not twitter_config.get("twitter_subscription_available"):
+                continue
+            subscriptions = self.data_manager.get_twitter_subscriptions()
+            if not subscriptions:
+                continue
+            await self._refresh_twitter_cache(subscriptions, twitter_config)
+
+    async def _refresh_twitter_cache(self, subscriptions: List[str], twitter_config: Dict):
+        """
+        串行拉取各订阅账号的最新动态：账号之间按配置间隔等待，并复用同一个 HTTP 会话
+        """
+        fetch_interval = twitter_config.get("twitter_fetch_interval", 60)
+        logger.info(f"[Fiscok's][twitter_push]正在更新推特缓存，共 {len(subscriptions)} 个订阅")
+        async with aiohttp.ClientSession() as session:
+            for idx, twitter_id in enumerate(subscriptions):
+                if idx > 0 and fetch_interval > 0:
+                    await asyncio.sleep(fetch_interval)
+                logger.info(f"[Fiscok's][twitter_push]正在拉取推特账号 @{twitter_id} 的最新动态")
+                await fetch_twitter_data(twitter_id, self.data_manager, self.rssHub_full_url, session=session)
 
     # --- 推特定时推送 ---
     async def twitter_scheduled_push(self):
@@ -610,7 +622,9 @@ class Core(Star):
         logger.info(f"[Fiscok's][twitter_push]正在执行定时推送任务")
         subscriptions = self.data_manager.get_all_twitter_subscriptions()
         unified_msg_origins = self.data_manager.get_umo()
+        push_interval = self.config.get('twitter_subscription_config', {}).get("twitter_push_interval", 5)
         logger.info(f"[Fiscok's][twitter_push]当前订阅列表: {subscriptions}")
+        first_send = True
 
         for subscription in subscriptions:
             logger.info(f"[Fiscok's][twitter_push]正在处理订阅 @{subscription['twitter_id']} 的推送")
@@ -621,7 +635,8 @@ class Core(Star):
             forward_node = self._quote_info_create(
                 alias=alias,
                 account_id=twitter_id,
-                cache_getter=self.data_manager.get_twitter_cache,
+                # 只读取用于转发的少量缓存内容，避免把该账号全部未推送缓存都载入内存
+                cache_getter=lambda account_id: self.data_manager.get_twitter_cache(account_id, limit=10),
                 platform_name="动态"
             )
             if forward_node is None:
@@ -631,8 +646,11 @@ class Core(Star):
 
             for group_id in group_ids:
                 umo = unified_msg_origins.get(group_id)
+                # 仅在两次发送之间节流，避免无谓地等待首条消息
+                if not first_send and push_interval > 0:
+                    await asyncio.sleep(push_interval)
+                first_send = False
                 logger.info(f"[Fiscok's][twitter_push]正在向群 {group_id} 推送 @{twitter_id} 的最新动态")
-                await asyncio.sleep(20)  # 每次推送间隔20秒，避免过于频繁导致消息发送失败
                 res = await self.context.send_message(umo, message_chain)
                 logger.info(f"[Fiscok's][twitter_push]向群 {group_id} 推送 @{twitter_id} 的结果: {res}")
 
@@ -704,14 +722,11 @@ class Core(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @twitter_manager.command('trigger_cache_update', alias={'手动缓存更新'})
     async def twitter_trigger_cache_update(self, event: AstrMessageEvent):
-        logger.info(f"{self.config}")
-        if self.config.get('twitter_subscription_config', {}).get("twitter_subscription_available"):
+        twitter_config = self.config.get('twitter_subscription_config', {})
+        if twitter_config.get("twitter_subscription_available"):
             subscriptions = self.data_manager.get_twitter_subscriptions()
-            logger.info(f"[Fiscok's][twitter_push]正在更新推特缓存")
-            for twitter_id in subscriptions:
-                logger.info(f"[Fiscok's][twitter_push]正在拉取推特账号 @{twitter_id} 的最新动态")
-                await asyncio.sleep(180)  # 每次请求间隔3分钟，避免过于频繁导致推特账号异常
-                await fetch_twitter_data(twitter_id, self.data_manager, self.rssHub_full_url)
+            if subscriptions:
+                await self._refresh_twitter_cache(subscriptions, twitter_config)
         yield event.plain_result("已手动触发推特缓存更新，请检查日志以验证更新过程")
 
     @filter.permission_type(filter.PermissionType.ADMIN)

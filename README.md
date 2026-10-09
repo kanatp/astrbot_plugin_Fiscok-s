@@ -39,6 +39,8 @@
 
 情绪/好感度分析与表情包学习均在**后台异步执行**，不阻塞主对话请求流程；二者使用**独立的辅助 Provider 实例并自动关闭思考模式**（按 Anthropic / Gemini / OpenAI 兼容家族自适应），避免额外推理耗时叠加到对话延迟上。
 
+Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之间等待（首个不等待）；拉取过程复用同一个 HTTP 会话，减少连接建立开销。
+
 ## 指令
 
 | 指令 | 别名 | 说明 | 权限 |
@@ -68,7 +70,7 @@
 - `meme_config`：表情包功能开关、缓存大小、偷取概率上下限、发言携带概率、描述生成所用 LLM Provider、占位符标签名。
 - `emotion_config`：情绪与好感度系统开关、分析所用 LLM Provider（建议使用独立轻量模型）、分析温度、初始情绪、好感度初值 / 上下限 / 单次变化上限。
 - `segmented_parser_config`：换行分段解析开关与发送间隔。
-- `twitter_subscription_config`：Twitter 订阅开关、缓存大小与更新间隔、推送时间点、RSSHub 地址与端口。
+- `twitter_subscription_config`：Twitter 订阅开关、缓存大小与更新间隔、推送时间点、RSSHub 地址与端口，以及拉取账号间隔 `twitter_fetch_interval`（秒）与推送群聊间隔 `twitter_push_interval`（秒）。
 - `instagram_subscription_config`：Instagram 订阅开关、推送时间点、缓存大小、是否拉取快拍、拉取间隔。
 
 ## 依赖

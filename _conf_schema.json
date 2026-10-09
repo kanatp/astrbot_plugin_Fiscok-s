@@ -144,6 +144,18 @@
         "describe": "rssHub接口端口",
         "type": "int",
         "default": 1200
+      },
+      "twitter_fetch_interval": {
+        "describe": "拉取不同推特账号之间的间隔（秒）",
+        "type": "int",
+        "default": 180,
+        "hint": "过小可能导致推特账号触发风控；此值默认与原行为一致"
+      },
+      "twitter_push_interval": {
+        "describe": "向不同群聊推送之间的间隔（秒）",
+        "type": "float",
+        "default": 20,
+        "hint": "过小可能导致合并转发消息发送失败；此值默认与原行为一致"
       }
     }
   },

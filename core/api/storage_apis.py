@@ -230,28 +230,42 @@ class DataManager:
             json.dump(cache_list, f, ensure_ascii=False, indent=2)
 
     # --- 推特数据缓存核心接口 ---
-    def get_twitter_cache(self, twitter_id: str) -> List[Dict]:
+    def get_twitter_cache(self, twitter_id: str, limit: Optional[int] = None) -> List[Dict]:
         """
         返回指定推特账号的未被推送的缓存数据列表，供定时推送使用
+
+        :param limit: 仅读取并按时间戳排序后取前 limit 条未推送内容（避免把所有缓存内容都读进内存）
         """
         cache_list = self._load_cache_list(twitter_id)
         push_record = self._load_push_record()
+        pushed_ids = push_record.get("record_list", [])
+
+        # 先筛出未推送项并按时间戳排序，只读取真正需要的内容文件
+        pending = [
+            item for item in cache_list
+            if item.get("content_id") and item.get("content_id") not in pushed_ids
+        ]
+        pending.sort(key=lambda x: x.get("timestamp", ""))
+        if limit is not None:
+            pending = pending[:limit]
 
         result = []
+        for item in pending:
+            content_id = item.get("content_id")
+            content_path = self.twitter_cache_root / twitter_id / content_id / "content.txt"
+            if content_path.exists():
+                with open(content_path, 'r', encoding='utf-8') as f:
+                    try:
+                        result.append(json.load(f))
+                    except json.JSONDecodeError:
+                        logger.error(f"[Fiscok's][dataManager][getTwitterCache]解析缓存内容失败，文件可能损坏: {content_path}")
+            else:
+                logger.warning(f"[Fiscok's][dataManager][getTwitterCache]缓存内容文件不存在: {content_path}")
+
+        # 沿用原有语义：所有未推送内容均计入推送记录
         for item in cache_list:
             content_id = item.get("content_id")
             if content_id and content_id not in push_record.get("record_list", []):
-                content_path = self.twitter_cache_root / twitter_id / content_id / "content.txt"
-                if content_path.exists():
-                    with open(content_path, 'r', encoding='utf-8') as f:
-                        try:
-                            content_data = json.load(f)
-                            result.append(content_data)
-                        except json.JSONDecodeError:
-                            logger.error(f"[Fiscok's][dataManager][getTwitterCache]解析缓存内容失败，文件可能损坏: {content_path}")
-                else:
-                    logger.warning(f"[Fiscok's][dataManager][getTwitterCache]缓存内容文件不存在: {content_path}")
-
                 push_record.setdefault("record_list", []).append(content_id)
 
         push_record["last_push"] = datetime.now().isoformat()

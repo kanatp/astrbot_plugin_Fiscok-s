@@ -70,60 +70,77 @@ class _DescriptionParser(HTMLParser):
 
 
 # --- 异步的目标抓取入库 ---
-async def fetch_twitter_data(twitter_id: str, manager: DataManager, url: str):
+async def fetch_twitter_data(
+    twitter_id: str,
+    manager: DataManager,
+    url: str,
+    session=None,
+):
     """
     :param twitter_id: 目标推特用户名（不带 @）
     :param manager: 数据管理器实例，用于访问存储
     :param url: rssHub接口地址，默认为本地部署地址
+    :param session: 可复用的 aiohttp 会话；传入时复用连接，避免每个账号都重建连接
     此处从本地的rssHub中调用接口获取数据，传入推特用户名，返回并解析推特数据，最终返回一个包含推特信息的列表
     """
-    import aiohttp
-
     # 上传之前记得修改！！
     if not url:
         logger.error("RSSHub URL 未配置，无法获取 Twitter 数据")
         return
+
+    if session is not None:
+        await _fetch_twitter_feed(session, twitter_id, manager, url)
+        return
+
+    import aiohttp
+
+    async with aiohttp.ClientSession() as owned_session:
+        await _fetch_twitter_feed(owned_session, twitter_id, manager, url)
+
+
+async def _fetch_twitter_feed(session, twitter_id: str, manager: DataManager, url: str):
+    """使用给定会话从 RSSHub 拉取并解析指定账号的动态"""
     full_url = f"http://{url}/twitter/user/{twitter_id}"
     logger.info(f"[Fiscok's][twitter_fetch]正在从 RSSHub 获取 Twitter 数据，URL: {full_url}")
-    async with aiohttp.ClientSession() as session:
-        async with session.get(full_url) as resp:
-            if resp.status != 200:
-                logger.exception(f"Failed to fetch Twitter data: {resp.status}")
-                return
-            xml_text = await resp.text()
-            root = ET.fromstring(xml_text)
-            channel = root.find("channel")
-            if channel is None:
-                return
+    async with session.get(full_url) as resp:
+        if resp.status != 200:
+            logger.error(f"Failed to fetch Twitter data: {resp.status}")
+            return
+        xml_text = await resp.text()
 
-            for item in channel.findall("item"):
-                desc_el = item.find("description")
-                pubdate_el = item.find("pubDate")
-                content_id_el = item.find("link")
+    root = ET.fromstring(xml_text)
+    channel = root.find("channel")
+    if channel is None:
+        return
 
-                if desc_el is None or not (desc_el.text or "").strip():
-                    continue
+    for item in channel.findall("item"):
+        desc_el = item.find("description")
+        pubdate_el = item.find("pubDate")
+        content_id_el = item.find("link")
 
-                content_id = content_id_el.text.split("/")[-1]
-                if manager.cache_in_storage(twitter_id, content_id):
-                    logger.info(f"[Fiscok's][twitter_fetch]内容 {content_id} 已存在缓存中，跳过")
-                    continue  # 已缓存过，跳过
-                if content_id == "":
-                    logger.warning(f"[Fiscok's][twitter_fetch]未能正确解析 content_id，跳过")
-                    continue
+        if desc_el is None or not (desc_el.text or "").strip():
+            continue
 
-                text, image_urls = _extract_text_and_image_urls(desc_el.text or "")
-                timestamp = _parse_pubdate(pubdate_el.text if pubdate_el is not None else "")
+        content_id = content_id_el.text.split("/")[-1]
+        if manager.cache_in_storage(twitter_id, content_id):
+            logger.info(f"[Fiscok's][twitter_fetch]内容 {content_id} 已存在缓存中，跳过")
+            continue  # 已缓存过，跳过
+        if content_id == "":
+            logger.warning(f"[Fiscok's][twitter_fetch]未能正确解析 content_id，跳过")
+            continue
 
-                formatted_context = {
-                    "twitter_id": twitter_id,
-                    "content_id": content_id,
-                    "text": text,
-                    "images": image_urls,
-                    "timestamp": timestamp.isoformat() if timestamp else None,
-                }
+        text, image_urls = _extract_text_and_image_urls(desc_el.text or "")
+        timestamp = _parse_pubdate(pubdate_el.text if pubdate_el is not None else "")
 
-                await manager.update_twitter_cache(formatted_context)
+        formatted_context = {
+            "twitter_id": twitter_id,
+            "content_id": content_id,
+            "text": text,
+            "images": image_urls,
+            "timestamp": timestamp.isoformat() if timestamp else None,
+        }
+
+        await manager.update_twitter_cache(formatted_context)
 
 # --- 工具函数 ---
 def _parse_pubdate(date_str: str) -> datetime | None:
