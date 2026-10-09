@@ -10,7 +10,17 @@ from .core.api.storage_apis import DataManager
 from .core.api.meme_apis import generate_meme_description
 from .core.api.emotion_apis import analyze_emotion_state
 from .core.api.provider_utils import close_aux_providers
-from .core.prompts import format_meme_placeholder_injection, format_emotion_state_injection
+from .core.api.topic_memory_apis import (
+    get_text_embedding,
+    decide_topic_memory,
+    retrieve_topics,
+    resolve_embedding_provider,
+)
+from .core.prompts import (
+    format_meme_placeholder_injection,
+    format_emotion_state_injection,
+    format_topic_memory_injection,
+)
 from .core.net.twitter_fetch import fetch_twitter_data, check_availability
 from .core.net.instagram_fetch import create_loader, fetch_instagram_posts, fetch_instagram_stories, check_instagram_access
 
@@ -42,6 +52,7 @@ class Core(Star):
         self._background_tasks: set = set()
         self._emotion_lock = asyncio.Lock()
         self._emotion_pending: set = set()
+        self._topic_pending: set = set()
 
         self.rssHub_base_url = self.config.get('twitter_subscription_config', {}).get("rssHub_url", "")
         self.rssHub_port = self.config.get('twitter_subscription_config', {}).get("rssHub_port", 1200)
@@ -140,6 +151,81 @@ class Core(Star):
         except Exception as e:
             logger.warning(f"[Fiscok's][emotion] 初始化用户好感度失败: {e}")
 
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def topic_learn_on_message(self, event: AstrMessageEvent):
+        """
+        在每次收到消息时触发话题记忆判定（后台异步执行，不阻塞主对话）
+        """
+        topic_config = self.config.get('topic_memory_config', {})
+        if not topic_config.get('available', False):
+            return
+
+        # 忽略引用和转发消息
+        if event.message_obj and event.message_obj.message:
+            for component in event.message_obj.message:
+                if isinstance(component, (Reply, Forward)):
+                    return
+
+        # 概率节流，控制辅助 LLM 成本
+        if random.random() >= topic_config.get('analyze_probability', 0.2):
+            return
+
+        message = event.message_str
+        if not message:
+            return
+
+        # 同步取出必要信息后再交给后台任务，避免 event 被回收/复用后读到错误数据
+        sender_id = event.get_sender_id()
+        if not sender_id or sender_id == event.get_self_id():
+            return
+        self._schedule_topic_learning(sender_id, event.get_sender_name(), message, topic_config)
+
+    @filter.on_llm_request()
+    async def on_llm_request_topic_hook(self, event: AstrMessageEvent, req: ProviderRequest):
+        """
+        在 LLM 请求阶段用当前消息做词向量检索，把相关话题记忆作为补充信息注入 system_prompt
+        """
+        topic_config = self.config.get('topic_memory_config', {})
+        if not topic_config.get('available', False):
+            return
+
+        query = event.message_str
+        if not query:
+            return
+
+        provider_id = topic_config.get('embedding_provider_id', '')
+        try:
+            # 未配置 Embedding Provider 时该功能静默禁用
+            if resolve_embedding_provider(self.context, provider_id) is None:
+                return
+
+            query_vector = await get_text_embedding(self.context, provider_id, query)
+            if not query_vector:
+                return
+
+            topics = self.data_manager.get_all_topics()
+            if not topics:
+                return
+
+            matched = retrieve_topics(
+                topics,
+                query_vector,
+                top_k=topic_config.get('retrieve_top_k', 3),
+                min_similarity=topic_config.get('min_similarity', 0.5),
+            )
+            if not matched:
+                return
+
+            injection = format_topic_memory_injection(matched)
+            if injection:
+                req.system_prompt = f"{req.system_prompt or ''}\n{injection}"
+                logger.info(
+                    f"[Fiscok's][topic] 已注入 {len(matched)} 条相关话题记忆: "
+                    f"{[t.get('keyword') for t in matched]}"
+                )
+        except Exception as e:
+            logger.warning(f"[Fiscok's][topic] 检索/注入话题记忆失败，不影响主请求: {e}")
+
     @filter.on_llm_request()
     async def on_llm_request_hook(self, event: AstrMessageEvent, req: ProviderRequest):
         """
@@ -225,6 +311,44 @@ class Core(Star):
                 logger.warning(f"[Fiscok's][emotion] 后台情绪/好感度分析失败，不影响主请求: {e}")
             finally:
                 self._emotion_pending.discard(sender_id)
+
+        self._spawn_background(_run())
+
+    def _schedule_topic_learning(self, sender_id: str, nickname: str, message: str, topic_config: Dict):
+        """
+        将话题记忆判定放入后台异步执行（同一用户串行，避免重复堆积）
+        """
+        if sender_id in self._topic_pending:
+            return
+        self._topic_pending.add(sender_id)
+
+        async def _run():
+            try:
+                # 辅助 LLM 判定是否值得保存该话题
+                result = await decide_topic_memory(
+                    self.context,
+                    llm_provider_id=topic_config.get('llm_provider_id', ''),
+                    nickname=nickname,
+                    dialogue=message,
+                )
+                if not result:
+                    return
+
+                # 计算话题内容的词向量后入库
+                vector = await get_text_embedding(
+                    self.context,
+                    topic_config.get('embedding_provider_id', ''),
+                    result.get('content', ''),
+                )
+                if not vector:
+                    logger.warning("[Fiscok's][topic] 话题向量计算失败，跳过入库")
+                    return
+
+                self.data_manager.add_topic(result.get('keyword', ''), result.get('content', ''), vector)
+            except Exception as e:
+                logger.warning(f"[Fiscok's][topic] 后台话题记忆判定失败，不影响主请求: {e}")
+            finally:
+                self._topic_pending.discard(sender_id)
 
         self._spawn_background(_run())
 
@@ -739,6 +863,34 @@ class Core(Star):
     @filter.command_group('gallery_manager', alias={'图库管理'})
     def gallery_manager(self):
         pass
+
+    # --- 话题记忆管理指令组 ---
+    @filter.command_group('topic_memory_manager', alias={'话题记忆管理'})
+    def topic_memory_manager(self):
+        pass
+
+    @topic_memory_manager.command('list', alias={'列表'})
+    async def topic_memory_list(self, event: AstrMessageEvent, limit: int = 20):
+        topics = self.data_manager.get_all_topics()
+        if not topics:
+            yield event.plain_result("话题记忆库为空")
+            return
+        recent = topics[-limit:]
+        lines = [f"话题记忆共 {len(topics)} 条，最近 {len(recent)} 条："]
+        for topic in recent:
+            lines.append(f"- {topic.get('keyword', '')} | {topic.get('timestamp', '')}")
+        yield event.plain_result("\n".join(lines))
+
+    @topic_memory_manager.command('count', alias={'数量'})
+    async def topic_memory_count(self, event: AstrMessageEvent):
+        max_topics = self.config.get('topic_memory_config', {}).get('max_topics', 300)
+        yield event.plain_result(f"当前话题记忆 {self.data_manager.get_topic_count()} 条，上限 {max_topics} 条")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @topic_memory_manager.command('clear', alias={'清空'})
+    async def topic_memory_clear(self, event: AstrMessageEvent):
+        self.data_manager.clear_topics()
+        yield event.plain_result("已清空话题记忆库")
 
     # --- Instagram 缓存更新 ---
     async def instagram_cache_update(self):

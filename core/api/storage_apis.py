@@ -20,6 +20,7 @@ class DataManager:
         self.meme_library_root = self.root / 'meme_library'
         self.instagram_cache_root = self.root / 'instagram_cache'
         self.affinity_root = self.root / 'affinity'
+        self.topic_memory_root = self.root / 'topic_memory'
 
         self.config = config
 
@@ -39,6 +40,7 @@ class DataManager:
             self.meme_library_root.mkdir(parents=True, exist_ok=True)
             self.instagram_cache_root.mkdir(parents=True, exist_ok=True)
             self.affinity_root.mkdir(parents=True, exist_ok=True)
+            self.topic_memory_root.mkdir(parents=True, exist_ok=True)
 
             logger.info('[DataManager] 已完成数据目录构建]')
         else:
@@ -47,6 +49,7 @@ class DataManager:
             self.meme_library_root.mkdir(parents=True, exist_ok=True)
             self.instagram_cache_root.mkdir(parents=True, exist_ok=True)
             self.affinity_root.mkdir(parents=True, exist_ok=True)
+            self.topic_memory_root.mkdir(parents=True, exist_ok=True)
 
     # --- bilibili视频统计基础组件 ---
     def _get_group_file(self, group_id: str) -> Path:
@@ -1050,3 +1053,84 @@ class DataManager:
 
         result.sort(key=lambda x: x.get("timestamp", ""))
         return result
+
+    # --- 话题记忆存储基础组件 ---
+    def _get_topic_db_path(self) -> Path:
+        """获取话题记忆数据库文件路径"""
+        return self.topic_memory_root / 'topic_db.json'
+
+    def _load_topic_db(self) -> List[Dict]:
+        """读取话题记忆数据库，文件不存在或损坏则返回空列表"""
+        file = self._get_topic_db_path()
+        if not file.exists():
+            return []
+        try:
+            with open(file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            logger.error(f"[DataManager][_load_topic_db]解析话题记忆数据库失败，文件可能损坏: {file}")
+            return []
+
+    def _save_topic_db(self, db: List[Dict]):
+        """将话题记忆数据库写回 JSON 文件（紧凑存储，避免向量数组占用大量空白）"""
+        file = self._get_topic_db_path()
+        file.parent.mkdir(parents=True, exist_ok=True)
+        with open(file, 'w', encoding='utf-8') as f:
+            json.dump(db, f, ensure_ascii=False, separators=(',', ':'))
+
+    def _generate_topic_id(self) -> str:
+        """生成唯一的话题记忆 ID"""
+        now = datetime.now().strftime('%Y%m%d_%H%M%S')
+        rand = random.randint(100, 999)
+        return f"topic_{now}_{rand}"
+
+    # --- 话题记忆核心接口 ---
+    def add_topic(self, keyword: str, content: str, vector: List[float]) -> Optional[str]:
+        """
+        添加一条话题记忆（唤起词 + 话题内容 + 词向量）
+
+        :param keyword: 唤起词
+        :param content: 话题记忆（原始对话内容）
+        :param vector: 话题内容的词向量
+        :return: 成功返回 topic_id，失败返回 None
+        """
+        try:
+            if not content or not vector:
+                logger.warning("[DataManager][add_topic]话题内容或向量为空，跳过写入")
+                return None
+
+            topic_id = self._generate_topic_id()
+            db = self._load_topic_db()
+            db.append({
+                "id": topic_id,
+                "keyword": keyword,
+                "content": content,
+                "vector": vector,
+                "timestamp": datetime.now().isoformat(),
+            })
+
+            # 记忆上限：超出后按时间戳淘汰最旧的记录
+            max_topics = int(self.config.get('topic_memory_config', {}).get('max_topics', 300))
+            if max_topics > 0 and len(db) > max_topics:
+                db.sort(key=lambda x: x.get("timestamp", ""))
+                db = db[-max_topics:]
+
+            self._save_topic_db(db)
+            logger.info(f"[DataManager][add_topic]已记录话题记忆: id={topic_id}, keyword={keyword}")
+            return topic_id
+        except Exception as e:
+            logger.error(f"[DataManager][add_topic]添加话题记忆失败: {e}", exc_info=True)
+            return None
+
+    def get_all_topics(self) -> List[Dict]:
+        """获取全部话题记忆条目（含向量）"""
+        return self._load_topic_db()
+
+    def get_topic_count(self) -> int:
+        """获取当前话题记忆条数"""
+        return len(self._load_topic_db())
+
+    def clear_topics(self):
+        """清空话题记忆库"""
+        self._save_topic_db([])
+        logger.info("[DataManager][clear_topics]已清空话题记忆库")

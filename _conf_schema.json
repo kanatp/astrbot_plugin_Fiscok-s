@@ -193,5 +193,50 @@
         "default": 1
       }
     }
+  },
+  "topic_memory_config": {
+    "describe": "话题记忆（词向量检索）配置",
+    "type": "object",
+    "items": {
+      "available": {
+        "describe": "是否启用话题记忆功能",
+        "type": "bool",
+        "default": false
+      },
+      "embedding_provider_id": {
+        "describe": "用于话题词向量的 Embedding Provider",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空时使用第一个可用的 Embedding Provider；未配置 Embedding Provider 时该功能自动禁用"
+      },
+      "llm_provider_id": {
+        "describe": "用于话题判定/抽取的LLM Provider",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空时使用第一个可用的模型；辅助调用会自动关闭思考模式"
+      },
+      "max_topics": {
+        "describe": "记忆上限（最大话题条数），超出按时间淘汰最旧",
+        "type": "int",
+        "default": 300
+      },
+      "min_similarity": {
+        "describe": "记忆下限（相似度阈值），低于该值的话题不注入",
+        "type": "float",
+        "default": 0.5
+      },
+      "retrieve_top_k": {
+        "describe": "单次检索最多注入的话题条数",
+        "type": "int",
+        "default": 3
+      },
+      "analyze_probability": {
+        "describe": "触发后台话题判定的概率（用于节流辅助LLM成本）",
+        "type": "float",
+        "default": 0.2
+      }
+    }
   }
 }
