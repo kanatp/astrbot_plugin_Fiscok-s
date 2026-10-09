@@ -9,6 +9,7 @@ from .core.api.bili_apis import get_bvid
 from .core.api.storage_apis import DataManager
 from .core.api.meme_apis import generate_meme_description
 from .core.api.emotion_apis import analyze_emotion_state
+from .core.api.provider_utils import close_aux_providers
 from .core.prompts import format_meme_placeholder_injection, format_emotion_state_injection
 from .core.net.twitter_fetch import fetch_twitter_data, check_availability
 from .core.net.instagram_fetch import create_loader, fetch_instagram_posts, fetch_instagram_stories, check_instagram_access
@@ -36,6 +37,11 @@ class Core(Star):
 
         # 模型自身的全局情绪状态（运行时变量，文字描述，不持久化）
         self.current_emotion = str(config.get('emotion_config', {}).get('emotion_init', '平静'))
+
+        # 后台任务：辅助调用（情绪分析/表情包学习）异步执行，避免阻塞主对话
+        self._background_tasks: set = set()
+        self._emotion_lock = asyncio.Lock()
+        self._emotion_pending: set = set()
 
         self.rssHub_base_url = self.config.get('twitter_subscription_config', {}).get("rssHub_url", "")
         self.rssHub_port = self.config.get('twitter_subscription_config', {}).get("rssHub_port", 1200)
@@ -86,7 +92,7 @@ class Core(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def meme_learn_on_message(self, event: AstrMessageEvent):
         """
-        在每次收到消息时触发表情包偷取判定（与 LLM 请求解耦）
+        在每次收到消息时触发表情包偷取判定（后台异步执行，不阻塞主对话）
         """
         meme_config = self.config.get('meme_config', {})
         if not meme_config.get('meme_available', False):
@@ -106,8 +112,15 @@ class Core(Star):
         learn_probability = learn_max - (learn_max - learn_min) * min(current_count / max_cache, 1.0)
         learn_probability = max(learn_probability, learn_min)
 
-        if random.random() < learn_probability:
-            await self._learn_meme_from_message(event, meme_config)
+        if random.random() >= learn_probability:
+            return
+
+        # 同步提取图片地址与来源后再交给后台任务，避免 event 被回收/复用后读到错误数据
+        image_urls = self._extract_emoji_urls(event)
+        if not image_urls:
+            return
+        source = f"group_{event.get_group_id()}" if event.get_group_id() else "private"
+        self._spawn_background(self._learn_meme_from_message(image_urls, source, meme_config))
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def ensure_user_affinity_on_message(self, event: AstrMessageEvent):
@@ -145,8 +158,8 @@ class Core(Star):
     @filter.on_llm_request()
     async def on_llm_request_emotion_hook(self, event: AstrMessageEvent, req: ProviderRequest):
         """
-        在 LLM 请求阶段阻塞式调用高温度情绪模型：
-        更新模型全局情绪（文字，运行时变量）与对当前用户的好感度（数值，持久化），并注入主 LLM 上下文
+        在 LLM 请求阶段注入当前已知的情绪/好感度状态（不阻塞主请求）；
+        情绪/好感度分析改为后台异步执行，更新结果供下一轮请求使用
         """
         emotion_config = self.config.get('emotion_config', {})
         if not emotion_config.get('available', False):
@@ -158,88 +171,126 @@ class Core(Star):
 
         try:
             nickname = event.get_sender_name()
-            result = await analyze_emotion_state(
-                self.context,
-                provider_id=emotion_config.get('llm_provider_id', ''),
-                nickname=nickname,
-                message=event.message_str,
-                current_emotion=self.current_emotion,
-                temperature=emotion_config.get('temperature', 1.2),
-                delta_max=emotion_config.get('delta_max', 5),
-            )
-            if not result:
-                return
-
-            # 更新模型全局情绪（文字描述），变化已在 emotion_apis 日志中说明
-            new_emotion = result.get('emotion', '')
-            if new_emotion:
-                self.current_emotion = new_emotion
-
-            # 更新该用户好感度（数值，JSON 持久化）
-            new_state = self.data_manager.update_user_affinity(
-                sender_id,
-                affinity_delta=result.get('affinity_delta', 0),
-                nickname=nickname,
-                min_=emotion_config.get('affinity_min', 0),
-                max_=emotion_config.get('affinity_max', 100),
-            )
+            # 立即用当前已知状态注入，避免等待情绪分析
+            affinity = self.data_manager.get_user_affinity(sender_id, nickname)
             injection = format_emotion_state_injection(
                 nickname,
                 self.current_emotion,
-                new_state.get('affinity', 50),
+                affinity,
             )
             req.system_prompt = f"{req.system_prompt or ''}\n{injection}"
-        except Exception as e:
-            logger.warning(f"[Fiscok's][emotion] 情绪/好感度分析失败，不影响主请求: {e}")
 
-    async def _learn_meme_from_message(self, event: AstrMessageEvent, meme_config: Dict):
+            # 后台异步分析，更新全局情绪与该用户好感度（供后续请求使用）
+            self._schedule_emotion_analysis(sender_id, nickname, event.message_str, emotion_config)
+        except Exception as e:
+            logger.warning(f"[Fiscok's][emotion] 注入情绪状态失败，不影响主请求: {e}")
+
+    def _schedule_emotion_analysis(self, sender_id: str, nickname: str, message: str, emotion_config: Dict):
         """
-        从消息中学习表情包：检测、下载、调用 LLM 生成描述、入库
+        将情绪/好感度分析放入后台异步执行（同一用户串行，避免重复堆积）
+        """
+        if sender_id in self._emotion_pending:
+            return
+        self._emotion_pending.add(sender_id)
+
+        async def _run():
+            try:
+                async with self._emotion_lock:
+                    result = await analyze_emotion_state(
+                        self.context,
+                        provider_id=emotion_config.get('llm_provider_id', ''),
+                        nickname=nickname,
+                        message=message,
+                        current_emotion=self.current_emotion,
+                        temperature=emotion_config.get('temperature', 1.2),
+                        delta_max=emotion_config.get('delta_max', 5),
+                    )
+                    if not result:
+                        return
+
+                    # 更新模型全局情绪（文字描述）
+                    new_emotion = result.get('emotion', '')
+                    if new_emotion:
+                        self.current_emotion = new_emotion
+
+                    # 更新该用户好感度（数值，JSON 持久化）
+                    self.data_manager.update_user_affinity(
+                        sender_id,
+                        affinity_delta=result.get('affinity_delta', 0),
+                        nickname=nickname,
+                        min_=emotion_config.get('affinity_min', 0),
+                        max_=emotion_config.get('affinity_max', 100),
+                    )
+            except Exception as e:
+                logger.warning(f"[Fiscok's][emotion] 后台情绪/好感度分析失败，不影响主请求: {e}")
+            finally:
+                self._emotion_pending.discard(sender_id)
+
+        self._spawn_background(_run())
+
+    def _spawn_background(self, coro):
+        """将协程放入后台执行，并持有引用避免被 GC 回收"""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    def _extract_emoji_urls(self, event: AstrMessageEvent) -> List[str]:
+        """
+        从消息中提取表情包（sub_type == 1 的图片）地址（同步执行）
+        """
+        raw_message = event.message_obj.raw_message
+
+        # 获取消息组件列表
+        message_parts = None
+        if raw_message and hasattr(raw_message, 'message'):
+            message_parts = raw_message.message
+        elif event.message_obj and hasattr(event.message_obj, 'message'):
+            message_parts = event.message_obj.message
+        elif isinstance(raw_message, list):
+            message_parts = raw_message
+
+        if not message_parts:
+            return []
+
+        urls: List[str] = []
+        for message_part in message_parts:
+            # 检测表情包类型
+            if isinstance(message_part, dict):
+                msg_type = message_part.get("type")
+                msg_data = message_part.get("data", {})
+                is_emoji = msg_type == "image" and msg_data.get("sub_type") == 1
+                image_url = msg_data.get("url", "") if is_emoji else ""
+            else:
+                msg_type = getattr(message_part, 'type', None)
+                msg_data = getattr(message_part, 'data', {})
+                sub_type = None
+                if isinstance(msg_data, dict):
+                    sub_type = msg_data.get("sub_type")
+                elif hasattr(msg_data, 'sub_type'):
+                    sub_type = getattr(msg_data, 'sub_type', None)
+                if sub_type is None:
+                    sub_type = getattr(message_part, 'sub_type', None)
+
+                is_emoji = msg_type == "image" and sub_type == 1
+                image_url = ''
+                if is_emoji:
+                    if isinstance(msg_data, dict):
+                        image_url = msg_data.get("url", "")
+                    else:
+                        image_url = getattr(msg_data, 'url', '') or getattr(message_part, 'url', '')
+
+            if is_emoji and image_url:
+                urls.append(image_url)
+
+        return urls
+
+    async def _learn_meme_from_message(self, image_urls: List[str], source: str, meme_config: Dict):
+        """
+        从消息中学习表情包：下载、调用 LLM 生成描述、入库（后台异步执行）
         """
         try:
-            raw_message = event.message_obj.raw_message
-
-            # 获取消息组件列表
-            message_parts = None
-            if raw_message and hasattr(raw_message, 'message'):
-                message_parts = raw_message.message
-            elif event.message_obj and hasattr(event.message_obj, 'message'):
-                message_parts = event.message_obj.message
-            elif isinstance(raw_message, list):
-                message_parts = raw_message
-
-            if not message_parts:
-                return
-
-            for message_part in message_parts:
-                # 检测表情包类型
-                if isinstance(message_part, dict):
-                    msg_type = message_part.get("type")
-                    msg_data = message_part.get("data", {})
-                    is_emoji = msg_type == "image" and msg_data.get("sub_type") == 1
-                    image_url = msg_data.get("url", "") if is_emoji else ""
-                else:
-                    msg_type = getattr(message_part, 'type', None)
-                    msg_data = getattr(message_part, 'data', {})
-                    sub_type = None
-                    if isinstance(msg_data, dict):
-                        sub_type = msg_data.get("sub_type")
-                    elif hasattr(msg_data, 'sub_type'):
-                        sub_type = getattr(msg_data, 'sub_type', None)
-                    if sub_type is None:
-                        sub_type = getattr(message_part, 'sub_type', None)
-
-                    is_emoji = msg_type == "image" and sub_type == 1
-                    image_url = ''
-                    if is_emoji:
-                        if isinstance(msg_data, dict):
-                            image_url = msg_data.get("url", "")
-                        else:
-                            image_url = getattr(msg_data, 'url', '') or getattr(message_part, 'url', '')
-
-                if not is_emoji or not image_url:
-                    continue
-
+            for image_url in image_urls:
                 logger.info(f"[Fiscok's][meme] 检测到表情包: {image_url}")
 
                 # 下载图片到临时目录
@@ -273,7 +324,6 @@ class Core(Star):
                     continue
 
                 # 添加到表情库
-                source = f"group_{event.get_group_id()}" if event.get_group_id() else "private"
                 meme_id = self.data_manager.add_meme(
                     image_path=str(temp_path),
                     description=description_result.get('description', ''),
@@ -876,6 +926,13 @@ class Core(Star):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
         self.running = False
         self.timer.shutdown()
+
+        # 取消所有后台任务并释放辅助 Provider
+        for task in list(self._background_tasks):
+            task.cancel()
+        self._background_tasks.clear()
+        await close_aux_providers()
+
         self.data_manager = None
 
         logger.info(f"{self.name} 插件已被卸载/停用，相关资源已清理")

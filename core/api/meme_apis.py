@@ -7,6 +7,7 @@ from typing import Dict, Optional
 from astrbot.api import logger
 from astrbot.core.star.context import Context
 from ..prompts import MEME_DESCRIPTION_PROMPT, MEME_DESCRIPTION_SYSTEM_PROMPT, EMOTION_MAP, VALID_EMOTIONS
+from .provider_utils import get_aux_provider
 
 
 async def generate_meme_description(
@@ -26,17 +27,11 @@ async def generate_meme_description(
         {"description": "...", "tags": [...], "emotion": "..."} 或 None
     """
     try:
-        # 获取 Provider 实例
-        provider = context.get_provider_by_id(provider_id) if provider_id else None
-
+        # 获取关闭思考的独立 Provider 实例（未配置时回退到第一个可用模型）
+        provider = await get_aux_provider(context, provider_id)
         if provider is None:
-            # 如果未指定或未找到，尝试获取默认 Provider
-            all_providers = context.get_all_providers()
-            if all_providers:
-                provider = all_providers[0]
-            else:
-                logger.error("[meme_apis] 未找到可用的 LLM Provider")
-                return None
+            logger.error("[meme_apis] 未找到可用的 LLM Provider")
+            return None
 
         logger.info(f"[meme_apis] 正在使用 Provider {provider_id or 'default'} 生成表情包描述")
 

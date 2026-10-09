@@ -9,6 +9,7 @@ from typing import Dict, Optional
 from astrbot.api import logger
 from astrbot.core.star.context import Context
 from ..prompts import EMOTION_ANALYSIS_SYSTEM_PROMPT, format_emotion_analysis_prompt
+from .provider_utils import get_aux_provider
 
 
 def _extract_json(result_text: str) -> Optional[dict]:
@@ -72,16 +73,12 @@ async def analyze_emotion_state(
         {"emotion": str, "affinity_delta": int} 或 None
     """
     try:
-        # 获取 Provider 实例（与表情包系统相同的方式从宿主获取）
-        provider = context.get_provider_by_id(provider_id) if provider_id else None
+        # 获取关闭思考的独立 Provider 实例（未配置时回退到第一个可用模型）
+        provider = await get_aux_provider(context, provider_id)
 
         if provider is None:
-            all_providers = context.get_all_providers()
-            if all_providers:
-                provider = all_providers[0]
-            else:
-                logger.error("[emotion_apis] 未找到可用的 LLM Provider")
-                return None
+            logger.error("[emotion_apis] 未找到可用的 LLM Provider")
+            return None
 
         logger.info(f"[emotion_apis] 正在使用 Provider {provider_id or 'default'} 分析用户 {nickname} 的情绪/好感度")
 
