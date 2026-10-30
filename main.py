@@ -330,14 +330,6 @@ class Core(Star):
             )
             return
 
-        # 相关性达标也按概率接话，避免同一话题里话太密
-        reply_probability = float(track_config.get('reply_probability', 0.6) or 0)
-        if reply_probability < 1.0 and random.random() >= reply_probability:
-            logger.info(
-                f"[Fiscok's][track] 概率跳过本次接话（{reply_probability:.2f}）：{nickname}：{message[:40]}"
-            )
-            return
-
         session['auto_rounds'] = session.get('auto_rounds', 0) + 1
         session['idle_since'] = 0
         session['last_active'] = time.time()
