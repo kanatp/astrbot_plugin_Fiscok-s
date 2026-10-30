@@ -1,6 +1,6 @@
 {
   "meme_config": {
-    "describe" : "meme发送/获取相关配置",
+    "describe" : "表情包学习与发送配置",
     "type" : "object",
     "items" : {
       "meme_available" : {
@@ -9,45 +9,46 @@
         "default" : false
       },
       "meme_cache_size" : {
-        "describe" : "表情包缓存大小，单位为条",
+        "describe" : "表情包库容量上限（条），超出按时间淘汰最旧",
         "type" : "int",
         "default" : 200
       },
       "emoji_learn_max" : {
-        "describe" : "bot偷取群友meme的最大概率（表情包数量为0时）",
+        "describe" : "学习群友表情包的最高概率（表情库为空时）",
         "type" : "float",
         "default" : 0.7
       },
       "emoji_learn_min" : {
-        "describe" : "bot偷取群友meme的最小概率（表情包数量达到上限时）",
+        "describe" : "学习群友表情包的最低概率（表情库已满时，仍保留少量学习机会）",
         "type" : "float",
         "default" : 0.02
       },
       "emoji_attach_positive" : {
-        "describe" : "bot发言时携带meme的概率",
+        "describe" : "每次发言时向模型注入“可使用表情包”提示的概率",
         "type" : "float",
-        "default" : 0.7
+        "default" : 0.7,
+        "hint" : "控制模型被允许输出表情包占位符的概率（用于节流），并非直接决定是否发送表情包"
       },
-      "llm_provider_id" : {
-        "describe" : "用于表情包描述生成的LLM Provider",
+      "multimodal_provider_id" : {
+        "describe" : "表情包看图描述所用多模态（视觉）模型 Provider",
         "type" : "string",
         "default" : "",
         "_special" : "select_provider",
-        "hint" : "留空时使用第一个可用的模型；辅助调用会自动关闭思考模式"
+        "hint" : "仅用于学习链路：看图生成描述/标签/情绪并入表情库；与发送链路分离，发送由主对话模型通过占位符驱动。留空时使用第一个可用模型"
       },
       "placeholder_tag" : {
-        "describe" : "LLM回复中表情包占位符的标签名",
+        "describe" : "表情包占位符标签（模型输出 [标签:情绪] 时触发表情包）",
         "type" : "string",
         "default" : "meme"
       }
     }
   },
   "segmented_parser_config": {
-    "describe": "LLM回复换行分段解析器配置",
+    "describe": "回复换行分段发送配置",
     "type": "object",
     "items": {
       "available": {
-        "describe": "是否启用换行分段解析器",
+        "describe": "是否启用换行分段发送（把一条回复按换行拆成多条消息发送）",
         "type": "bool",
         "default": false
       },
@@ -68,7 +69,7 @@
         "default": false
       },
       "llm_provider_id": {
-        "describe": "用于情绪/好感度分析的LLM Provider（高温度）",
+        "describe": "情绪/好感度分析所用辅助 LLM Provider（高温，后台调用）",
         "type": "string",
         "default": "",
         "_special": "select_provider",
@@ -107,7 +108,7 @@
     }
   },
   "twitter_subscription_config": {
-    "describe": "twitter订阅相关配置",
+    "describe": "Twitter 订阅推送配置",
     "type": "object",
     "items": {
       "twitter_subscription_available": {
@@ -121,7 +122,7 @@
         "default": 100
       },
       "twitter_push_time": {
-        "describe": "twitter推送的时间",
+        "describe": "Twitter 定时推送的时间点（HH:MM）",
         "type": "list",
         "default": [
           "08:00",
@@ -136,7 +137,7 @@
         "default": 1
       },
       "rssHub_url": {
-        "describe": "rssHub接口地址",
+        "describe": "RSSHub 接口地址（不含端口，如 127.0.0.1）",
         "type": "string",
         "default": "127.0.0.1"
       },
@@ -210,7 +211,7 @@
         "hint": "手动填写在 AstrBot 中已配置的 Embedding 模型 Provider 的 ID（如 ollama/bge-m3）。留空时自动使用第一个可用的 Embedding Provider；未配置 Embedding Provider 时该功能自动禁用。注意：本项不使用下拉选择器，因 AstrBot 的 select_provider 只列出对话模型"
       },
       "llm_provider_id": {
-        "describe": "用于话题判定/抽取的LLM Provider",
+        "describe": "话题判定所用辅助 LLM Provider（低温度，后台调用）",
         "type": "string",
         "default": "",
         "_special": "select_provider",
@@ -232,9 +233,35 @@
         "default": 3
       },
       "analyze_probability": {
-        "describe": "触发后台话题判定的概率（用于节流辅助LLM成本）",
+        "describe": "每条消息触发后台话题判定的概率（节流辅助模型开销）",
         "type": "float",
         "default": 0.2
+      },
+      "max_content_chars": {
+        "describe": "单条话题记忆注入的最大字符数（超出截断，0 表示不限制）",
+        "type": "int",
+        "default": 200
+      }
+    }
+  },
+  "context_optimize_config": {
+    "describe": "上下文精简（降低上下文 token 开销）",
+    "type": "object",
+    "items": {
+      "available": {
+        "describe": "是否启用上下文精简（由插件接管请求上下文裁剪）",
+        "type": "bool",
+        "default": false
+      },
+      "keep_recent_messages": {
+        "describe": "保留最近的消息条数（1 条≈半轮；0 表示不按条数裁剪）",
+        "type": "int",
+        "default": 10
+      },
+      "max_context_chars": {
+        "describe": "上下文总字符上限（超出则丢弃更早消息；0 表示不限制）",
+        "type": "int",
+        "default": 0
       }
     }
   }

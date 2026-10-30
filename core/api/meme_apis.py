@@ -1,5 +1,5 @@
 '''
-用于调用 LLM 对表情包图片进行描述和标签生成
+用于调用多模态 LLM 对表情包图片进行描述和标签生成（仅学习/入库链路，与发送链路分离）
 '''
 import json
 from typing import Dict, Optional
@@ -16,7 +16,7 @@ async def generate_meme_description(
     provider_id: str = ""
 ) -> Optional[Dict]:
     """
-    调用 LLM 对表情包图片进行描述和标签生成
+    调用多模态 LLM 对表情包图片进行描述和标签生成（仅学习链路，发送由主对话模型驱动）
 
     Args:
         image_path: 图片本地路径

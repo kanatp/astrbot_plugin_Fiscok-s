@@ -9,11 +9,7 @@
 # 表情包占位符注入提示词（添加到 system_prompt 中引导 LLM 生成占位符）
 # 使用时需要格式化 placeholder_tag 参数
 MEME_PLACEHOLDER_INJECTION = """
-
-如果需要使用表情包来增强回复效果，可以在回复中使用占位符 [{placeholder_tag}:情绪描述]，
-例如 [{placeholder_tag}:开心]、[{placeholder_tag}:无语]、[{placeholder_tag}:困惑]。
-可用的情绪关键词：开心、难过、惊讶、无语、愤怒、困惑、害羞、搞笑。
-注意：每次回复最多使用一个表情包占位符，且只在合适的时候使用。"""
+如需用表情包增强回复，可输出 [{placeholder_tag}:情绪]（每轮最多 1 个，情绪∈开心/难过/惊讶/无语/愤怒/困惑/害羞/搞笑），非必要不用。"""
 
 # 表情包图片描述生成提示词
 MEME_DESCRIPTION_PROMPT = """请分析这张表情包图片，返回以下JSON格式：
@@ -88,12 +84,8 @@ EMOTION_ANALYSIS_PROMPT = """你是聊天机器人（角色扮演的虚拟形象
 # 情绪/好感度状态注入提示词（添加到主 LLM 的 system_prompt 中）
 # 使用时需要格式化 nickname、emotion、affinity
 EMOTION_STATE_INJECTION = """
-<当前状态>
-你当前的全局情绪：{emotion}
-你对该用户（{nickname}）的好感度：{affinity}
-</当前状态>
-请根据你的全局情绪调整回复的整体语气：情绪积极则欢快热情，情绪消极则低沉疏远。
-请根据对该用户的好感度调整对待该用户的态度：好感度越高越亲切热情，越低越冷淡疏离。"""
+<状态>情绪：{emotion}｜对{nickname}好感度：{affinity}</状态>
+据此调整语气与态度：情绪/好感度越高越热情，越低越冷淡。"""
 
 
 def format_emotion_analysis_prompt(current_emotion: str, nickname: str, message: str) -> str:

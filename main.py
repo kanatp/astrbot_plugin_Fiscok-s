@@ -216,6 +216,14 @@ class Core(Star):
             if not matched:
                 return
 
+            # 截断单条话题内容，控制注入体积
+            max_chars = int(topic_config.get('max_content_chars', 200) or 0)
+            if max_chars > 0:
+                for topic in matched:
+                    content = str(topic.get('content', ''))
+                    if len(content) > max_chars:
+                        topic['content'] = content[:max_chars] + '…'
+
             injection = format_topic_memory_injection(matched)
             if injection:
                 req.system_prompt = f"{req.system_prompt or ''}\n{injection}"
@@ -225,6 +233,56 @@ class Core(Star):
                 )
         except Exception as e:
             logger.warning(f"[Fiscok's][topic] 检索/注入话题记忆失败，不影响主请求: {e}")
+
+    @filter.on_llm_request()
+    async def on_llm_request_context_trim_hook(self, event: AstrMessageEvent, req: ProviderRequest):
+        """
+        上下文精简：由插件接管请求上下文裁剪，降低随历史累积而增长的 token 开销。
+        仅在配置开启时生效；默认不裁剪，保持原行为。
+        """
+        cfg = self.config.get('context_optimize_config', {})
+        if not cfg.get('available', False):
+            return
+
+        try:
+            keep_recent = int(cfg.get('keep_recent_messages', 10) or 0)
+            max_chars = int(cfg.get('max_context_chars', 0) or 0)
+            contexts = getattr(req, 'contexts', None)
+            if not contexts:
+                return
+
+            trimmed = self._trim_contexts(contexts, keep_recent, max_chars)
+            if trimmed != contexts:
+                logger.info(f"[Fiscok's][context] 上下文精简：{len(contexts)} -> {len(trimmed)} 条")
+                req.contexts = trimmed
+        except Exception as e:
+            logger.warning(f"[Fiscok's][context] 上下文精简失败，不影响主请求: {e}")
+
+    @staticmethod
+    def _trim_contexts(contexts: List[Dict], keep_recent: int, max_chars: int) -> List[Dict]:
+        """
+        裁剪上下文：先按最近条数截断，再按字符上限从尾部向前保留。
+        至少保留最新一条；结果首条若为 assistant 则丢弃，避免角色序列异常。
+        """
+        if keep_recent > 0:
+            contexts = contexts[-keep_recent:]
+
+        if max_chars > 0:
+            kept = []
+            total = 0
+            for msg in reversed(contexts):
+                content = msg.get('content') if isinstance(msg, dict) else None
+                if not isinstance(content, str):
+                    content = str(content or '')
+                if kept and total + len(content) > max_chars:
+                    break
+                kept.append(msg)
+                total += len(content)
+            contexts = list(reversed(kept))
+
+        while contexts and isinstance(contexts[0], dict) and contexts[0].get('role') == 'assistant':
+            contexts = contexts[1:]
+        return contexts
 
     @filter.on_llm_request()
     async def on_llm_request_hook(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -433,7 +491,7 @@ class Core(Star):
                     continue
 
                 # 调用 LLM 生成描述
-                provider_id = meme_config.get('llm_provider_id', '')
+                provider_id = meme_config.get('multimodal_provider_id', '')
                 description_result = await generate_meme_description(
                     str(temp_path),
                     self.context,
