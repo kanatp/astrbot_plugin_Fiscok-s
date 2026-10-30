@@ -17,9 +17,13 @@ from .core.api.topic_memory_apis import (
     resolve_embedding_provider,
 )
 from .core.api.topic_tracking_apis import decide_topic_continuation
+from .core.api.proactive_chat_apis import generate_proactive_message
+from .core.api.persona_evolution_apis import evolve_persona
+from astrbot.core.message.message_event_result import MessageChain
 from .core.prompts import (
     format_meme_placeholder_injection,
     format_emotion_state_injection,
+    format_persona_overlay_injection,
     format_topic_memory_injection,
     TOPIC_TRACKING_REPLY_INJECTION,
 )
@@ -59,6 +63,17 @@ class Core(Star):
 
         # 群聊话题跟踪会话（umo -> 会话状态），仅内存驻留
         self._topic_sessions: Dict[str, Dict] = {}
+
+        # 主动发起聊天：群聊最近消息缓冲与各群发言状态（仅内存驻留）
+        self._group_recent: Dict[str, List[str]] = {}
+        self._group_last_activity: Dict[str, float] = {}
+        self._proactive_states: Dict[str, Dict] = {}
+
+        # 人设演化：插件侧可演化、可回滚的“自我设定”，与原生人设叠加注入
+        self._persona_overlay = str(self.data_manager.get_evolved_persona().get('persona', '') or '')
+        self._persona_recent: Dict[str, List[str]] = {}
+        self._persona_reply_count = 0
+        self._persona_evolve_pending = False
 
         self.rssHub_base_url = self.config.get('twitter_subscription_config', {}).get("rssHub_url", "")
         self.rssHub_port = self.config.get('twitter_subscription_config', {}).get("rssHub_port", 1200)
@@ -105,6 +120,9 @@ class Core(Star):
 
         # 启动定时任务
         self.timer.start()
+
+        # 主动发起聊天：周期性检查冷场群聊
+        self._spawn_background(self._proactive_loop())
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def meme_learn_on_message(self, event: AstrMessageEvent):
@@ -290,6 +308,36 @@ class Core(Star):
             system_prompt=TOPIC_TRACKING_REPLY_INJECTION,
         )
 
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def proactive_buffer_on_message(self, event: AstrMessageEvent):
+        """
+        主动发起聊天：记录群聊最近消息与活跃时间，供判定“冷场”与生成话题参考
+        """
+        proactive_config = self.config.get('proactive_chat_config', {})
+        is_private = not event.get_group_id()
+        if is_private:
+            if not proactive_config.get('private_available', False):
+                return
+        elif not proactive_config.get('available', False):
+            return
+
+        sender_id = event.get_sender_id()
+        if not sender_id or sender_id == event.get_self_id():
+            return
+        # 私聊主动仅对白名单用户生效（留空表示不启用）
+        if is_private and not self._is_user_allowed(sender_id, proactive_config):
+            return
+
+        message = (event.message_str or '').strip()
+        if not message or message.startswith(('/', '／')):
+            return
+
+        umo = event.unified_msg_origin
+        self._group_last_activity[umo] = time.time()
+        self._append_group_line(
+            umo, event.get_sender_name() or '群友', message, proactive_config
+        )
+
     @filter.on_llm_request()
     async def on_llm_request_topic_hook(self, event: AstrMessageEvent, req: ProviderRequest):
         """
@@ -439,6 +487,103 @@ class Core(Star):
         except Exception as e:
             logger.warning(f"[Fiscok's][emotion] 注入情绪状态失败，不影响主请求: {e}")
 
+    @filter.on_llm_request()
+    async def on_llm_request_persona_hook(self, event: AstrMessageEvent, req: ProviderRequest):
+        """
+        人设演化：注入当前“自我设定”，并记录对话用于后续演化参考
+        """
+        persona_config = self.config.get('persona_evolution_config', {})
+        if not persona_config.get('available', False):
+            return
+
+        try:
+            injection = format_persona_overlay_injection(self._persona_overlay)
+            if injection:
+                req.system_prompt = f"{req.system_prompt or ''}\n{injection}"
+
+            nickname = event.get_sender_name() or '对方'
+            self._append_persona_line(
+                event.unified_msg_origin, nickname, event.message_str, persona_config
+            )
+        except Exception as e:
+            logger.warning(f"[Fiscok's][persona] 注入自我设定失败，不影响主请求: {e}")
+
+    @filter.on_llm_response()
+    async def on_llm_response_persona_hook(self, event: AstrMessageEvent, resp):
+        """
+        人设演化：记录自己的发言，按配置的回复条数周期触发一次后台演化
+        """
+        persona_config = self.config.get('persona_evolution_config', {})
+        if not persona_config.get('available', False):
+            return
+
+        try:
+            reply = (getattr(resp, 'completion_text', '') or '').strip()
+            if not reply:
+                return
+
+            umo = event.unified_msg_origin
+            self._append_persona_line(umo, '我', reply, persona_config)
+
+            every = int(persona_config.get('evolve_every_messages', 10) or 0)
+            if every <= 0:
+                return
+            self._persona_reply_count += 1
+            if self._persona_reply_count < every or self._persona_evolve_pending:
+                return
+
+            dialogue = '\n'.join(self._persona_recent.get(umo, []))
+            if not dialogue:
+                return
+
+            self._persona_reply_count = 0
+            self._persona_evolve_pending = True
+            self._spawn_background(self._run_persona_evolution(dialogue, persona_config))
+        except Exception as e:
+            logger.warning(f"[Fiscok's][persona] 记录人设演化素材失败，不影响主流程: {e}")
+
+    def _append_persona_line(self, umo: str, speaker: str, message: str, cfg: Dict):
+        """记录一条人设演化参考对话（单条截断，按配置保留条数）"""
+        message = (message or '').strip()
+        if not message:
+            return
+        max_chars = int(cfg.get('review_line_chars', 80) or 0)
+        if max_chars > 0 and len(message) > max_chars:
+            message = message[:max_chars] + '…'
+
+        lines = self._persona_recent.setdefault(umo, [])
+        lines.append(f"{speaker}：{message}")
+
+        max_lines = int(cfg.get('review_recent_lines', 8) or 0)
+        if max_lines > 0 and len(lines) > max_lines:
+            del lines[:len(lines) - max_lines]
+
+    async def _run_persona_evolution(self, dialogue: str, cfg: Dict):
+        """后台调用辅助模型演化自我设定，成功则持久化并即时生效"""
+        try:
+            max_chars = int(cfg.get('max_chars', 200) or 200)
+            result = await evolve_persona(
+                self.context,
+                provider_id=cfg.get('llm_provider_id', ''),
+                current_persona=self._persona_overlay,
+                dialogue=dialogue,
+                max_chars=max_chars,
+            )
+            if not result or not result.get('changed'):
+                return
+
+            persona = (result.get('persona', '') or '').strip()
+            if not persona or persona == self._persona_overlay:
+                return
+
+            if self.data_manager.save_evolved_persona(persona, result.get('reason', '')):
+                self._persona_overlay = persona
+                logger.info(f"[Fiscok's][persona] 人设已演化：{persona[:60]}")
+        except Exception as e:
+            logger.warning(f"[Fiscok's][persona] 后台人设演化失败，不影响主流程: {e}")
+        finally:
+            self._persona_evolve_pending = False
+
     def _schedule_emotion_analysis(self, sender_id: str, nickname: str, message: str, emotion_config: Dict):
         """
         将情绪/好感度分析放入后台异步执行（同一用户串行，避免重复堆积）
@@ -567,6 +712,286 @@ class Core(Star):
                 umo, platform_id=event.get_platform_id()
             )
         return await manager.get_conversation(umo, conversation_id)
+
+    # --- 主动发起聊天 ---
+
+    @staticmethod
+    def _random_silence(cfg: Dict, is_private: bool = False) -> float:
+        """
+        随机生成“冷场多久后尝试开口”的间隔（秒），避免固定节奏。
+        私聊使用独立的下限/上限，默认间隔更长，避免打扰
+        """
+        if is_private:
+            min_minutes = float(cfg.get('private_min_silence_minutes', 120) or 0)
+            max_minutes = float(cfg.get('private_max_silence_minutes', 360) or 0)
+        else:
+            min_minutes = float(cfg.get('min_silence_minutes', 30) or 0)
+            max_minutes = float(cfg.get('max_silence_minutes', 90) or 0)
+        if max_minutes < min_minutes:
+            max_minutes = min_minutes
+        return random.uniform(min_minutes, max_minutes) * 60.0
+
+    @staticmethod
+    def _is_user_allowed(sender_id: str, cfg: Dict) -> bool:
+        """私聊主动的用户白名单匹配（QQ 号，逗号分隔；留空表示不启用私聊主动）"""
+        if not sender_id:
+            return False
+        whitelist = str(cfg.get('private_whitelist', '') or '').strip()
+        if not whitelist:
+            return False
+        items = [item.strip() for item in whitelist.replace('，', ',').split(',') if item.strip()]
+        return sender_id in items
+
+    def _append_group_line(self, umo: str, nickname: str, message: str, cfg: Dict):
+        """
+        记录群聊最近一条消息（单条截断、按配置保留条数）
+        """
+        message = (message or '').strip()
+        if not message:
+            return
+
+        max_chars = int(cfg.get('recent_line_chars', 80) or 0)
+        if max_chars > 0 and len(message) > max_chars:
+            message = message[:max_chars] + '…'
+
+        lines = self._group_recent.setdefault(umo, [])
+        lines.append(f"{nickname}：{message}")
+
+        max_lines = int(cfg.get('recent_lines', 8) or 0)
+        if max_lines > 0 and len(lines) > max_lines:
+            del lines[:len(lines) - max_lines]
+
+    @staticmethod
+    def _is_group_allowed(umo: str, cfg: Dict) -> bool:
+        """群聊白名单匹配（按 umo 或群号子串，留空表示全部）"""
+        whitelist = str(cfg.get('group_whitelist', '') or '').strip()
+        if not whitelist:
+            return True
+        items = [item.strip() for item in whitelist.replace('，', ',').split(',') if item.strip()]
+        return any(item in umo for item in items)
+
+    @staticmethod
+    def _in_active_hours(cfg: Dict) -> bool:
+        """是否在允许主动发言的时段（支持跨零点，如 23~7）"""
+        start = int(cfg.get('quiet_hours_start', 0) or 0)
+        end = int(cfg.get('quiet_hours_end', 7) or 0)
+        hour = time.localtime().tm_hour
+        if start == end:
+            return True
+        if start < end:
+            return not (start <= hour < end)
+        return not (hour >= start or hour < end)
+
+    @staticmethod
+    def _describe_now() -> str:
+        """当前时间描述（用于提示词，让发言符合作息）"""
+        weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+        lt = time.localtime()
+        hour = lt.tm_hour
+        if hour < 6:
+            period = '凌晨'
+        elif hour < 11:
+            period = '上午'
+        elif hour < 14:
+            period = '中午'
+        elif hour < 18:
+            period = '下午'
+        elif hour < 23:
+            period = '晚上'
+        else:
+            period = '深夜'
+        return f"{weekdays[lt.tm_wday]}{period} {lt.tm_hour:02d}:{lt.tm_min:02d}"
+
+    async def _proactive_loop(self):
+        """
+        主动发起聊天：周期性检查冷场群聊，由模型决定是否开口
+        """
+        while self.running:
+            try:
+                cfg = self.config.get('proactive_chat_config', {})
+                interval = max(15, int(cfg.get('check_interval_seconds', 60) or 60))
+                await asyncio.sleep(interval)
+                if not cfg.get('available', False) and not cfg.get('private_available', False):
+                    continue
+                await self._check_proactive(cfg)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[Fiscok's][proactive] 主动聊天检查失败: {e}")
+                await asyncio.sleep(60)
+
+    async def _check_proactive(self, cfg: Dict):
+        """遍历候选群聊：满足冷场、时段、冷却、日上限后，随机尝试开口"""
+        if not self._in_active_hours(cfg):
+            return
+
+        now = time.time()
+        today = time.strftime('%Y-%m-%d', time.localtime(now))
+        cooldown = float(cfg.get('cooldown_minutes', 20) or 0) * 60
+        probability = float(cfg.get('speak_probability', 0.6) or 0)
+
+        for umo, state in list(self._proactive_states.items()):
+            try:
+                is_private = bool(state.get('is_private'))
+                if is_private:
+                    if not cfg.get('private_available', False):
+                        continue
+                    if not self._is_user_allowed(state.get('sender_id', ''), cfg):
+                        continue
+                    min_silence = float(cfg.get('private_min_silence_minutes', 120) or 0) * 60
+                    daily_limit = int(cfg.get('private_daily_limit', 3) or 0)
+                else:
+                    if not cfg.get('available', False):
+                        continue
+                    if not self._is_group_allowed(umo, cfg):
+                        continue
+                    min_silence = float(cfg.get('min_silence_minutes', 30) or 0) * 60
+                    daily_limit = int(cfg.get('daily_limit_per_group', 6) or 0)
+
+                if state.get('daily_date') != today:
+                    state['daily_date'] = today
+                    state['daily_count'] = 0
+                if daily_limit > 0 and state.get('daily_count', 0) >= daily_limit:
+                    continue
+
+                last_active = max(
+                    self._group_last_activity.get(umo, 0),
+                    state.get('last_spoke_at', 0),
+                )
+                if now - last_active < min_silence:
+                    continue
+                if now < state.get('earliest_try', 0):
+                    continue
+                if cooldown > 0 and now - state.get('last_spoke_at', 0) < cooldown:
+                    continue
+
+                # 冷场满足后也不是必然开口，保留随机性
+                if probability > 0 and random.random() > probability:
+                    state['earliest_try'] = now + self._random_silence(cfg, is_private) * random.uniform(0.5, 1.0)
+                    continue
+
+                text = await self._generate_proactive_text(umo, state, cfg)
+                if not text:
+                    state['earliest_try'] = now + self._random_silence(cfg, is_private)
+                    continue
+
+                if not await self._send_proactive(umo, text, cfg, is_private):
+                    state['earliest_try'] = now + self._random_silence(cfg, is_private)
+                    continue
+
+                spoke_at = time.time()
+                state['last_spoke_at'] = spoke_at
+                state['daily_count'] = state.get('daily_count', 0) + 1
+                state['earliest_try'] = spoke_at + self._random_silence(cfg, is_private)
+
+                last_messages = state.setdefault('last_messages', [])
+                last_messages.append(text)
+                max_last = int(cfg.get('last_messages', 3) or 0)
+                if max_last > 0 and len(last_messages) > max_last:
+                    del last_messages[:len(last_messages) - max_last]
+            except Exception as e:
+                logger.warning(f"[Fiscok's][proactive] 处理群聊 {umo} 主动发言失败: {e}")
+
+    async def _generate_proactive_text(self, umo: str, state: Dict, cfg: Dict) -> str:
+        """结合人格、情绪、好感度、时间与会话记录生成一条主动消息"""
+        recent = list(self._group_recent.get(umo, []))
+        if not recent:
+            return ''
+
+        is_private = bool(state.get('is_private'))
+        persona_prompt = ''
+        try:
+            persona_obj = await self.context.persona_manager.get_default_persona_v3(umo)
+            if isinstance(persona_obj, dict):
+                persona_prompt = persona_obj.get('prompt', '') or ''
+        except Exception:
+            persona_prompt = ''
+
+        # 带上当前情绪状态，让主动发言的语气和近期状态一致
+        if self.current_emotion:
+            persona_prompt = f"{persona_prompt}\n\n你现在的心情：{self.current_emotion}".strip()
+
+        # 带上演化出的自我设定（开启人设演化时生效）
+        if self._persona_overlay and self.config.get('persona_evolution_config', {}).get('available', False):
+            persona_prompt = f"{persona_prompt}\n\n你的自我设定：{self._persona_overlay}".strip()
+
+        # 私聊时带上对该用户的好感度，让亲近程度和关系一致
+        if is_private and state.get('sender_id'):
+            try:
+                affinity = self.data_manager.get_user_affinity(
+                    state['sender_id'], state.get('nickname')
+                )
+                persona_prompt = f"{persona_prompt}\n\n你对 TA 的好感度：{affinity}/100".strip()
+            except Exception:
+                pass
+
+        text = await generate_proactive_message(
+            self.context,
+            provider_id=cfg.get('llm_provider_id', ''),
+            persona_prompt=persona_prompt,
+            time_desc=self._describe_now(),
+            recent=recent,
+            last_messages=list(state.get('last_messages', [])),
+            nickname=state.get('nickname', ''),
+            is_private=is_private,
+        )
+        if not text:
+            return ''
+
+        max_chars = int(cfg.get('max_chars', 120) or 0)
+        if max_chars > 0 and len(text) > max_chars:
+            text = text[:max_chars] + '…'
+        return text
+
+    async def _send_proactive(self, umo: str, text: str, cfg: Dict, is_private: bool = False) -> bool:
+        """发送主动消息；开启分段发送时按换行拆成多条，更像真人。
+        返回是否发送成功"""
+        seg_cfg = self.config.get('segmented_parser_config', {})
+        if seg_cfg.get('available', False):
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            interval = float(seg_cfg.get('send_interval', 0.5) or 0)
+        else:
+            lines = [text]
+            interval = 0
+
+        sent = 0
+        for index, line in enumerate(lines):
+            if index and interval > 0:
+                await asyncio.sleep(interval)
+            if await self.context.send_message(umo, MessageChain().message(line)):
+                sent += 1
+
+        if not sent:
+            logger.warning("[Fiscok's][proactive] 主动发言发送失败（未找到对应平台）")
+            return False
+
+        logger.info(f"[Fiscok's][proactive] 主动发言：{text[:60]}")
+        self._group_last_activity[umo] = time.time()
+        self._append_group_line(umo, '我', text, cfg)
+
+        # 若开启了话题跟踪，把这次主动发言也作为一个话题起点（话题跟踪仅针对群聊）
+        track_config = self.config.get('topic_tracking_config', {})
+        if not is_private and track_config.get('available', False):
+            self._start_topic_session(umo, text, list(self._group_recent.get(umo, [])), track_config)
+
+        return True
+
+    def _start_topic_session(self, umo: str, topic: str, recent: List[str], track_config: Dict):
+        """以机器人发言为起点开启话题会话"""
+        now = time.time()
+        max_chars = int(track_config.get('topic_seed_chars', 80) or 0)
+        if max_chars > 0 and len(topic) > max_chars:
+            topic = topic[:max_chars] + '…'
+        self._topic_sessions[umo] = {
+            'topic': topic,
+            'started_at': now,
+            'last_active': now,
+            'auto_rounds': 0,
+            'idle_rounds': 0,
+            'recent': list(recent),
+            'lock': asyncio.Lock(),
+        }
+        logger.info(f"[Fiscok's][track] 由主动发言开启话题跟踪：{topic[:60]}")
 
     def _spawn_background(self, coro):
         """将协程放入后台执行，并持有引用避免被 GC 回收"""
@@ -755,6 +1180,56 @@ class Core(Star):
                 self._append_recent(session, '我', reply, track_config)
         except Exception as e:
             logger.warning(f"[Fiscok's][track] 更新话题会话失败，不影响主流程: {e}")
+
+    @filter.on_llm_response()
+    async def on_llm_response_proactive_hook(self, event: AstrMessageEvent, resp):
+        """
+        主动发起聊天：记录机器人发言，并把“机器人发过言”的群纳入主动聊天候选
+        """
+        proactive_config = self.config.get('proactive_chat_config', {})
+        umo = event.unified_msg_origin
+        is_private = not event.get_group_id()
+        if is_private:
+            if not proactive_config.get('private_available', False):
+                return
+            if not self._is_user_allowed(event.get_sender_id(), proactive_config):
+                return
+        elif not proactive_config.get('available', False):
+            return
+
+        try:
+            reply = (getattr(resp, 'completion_text', '') or '').strip()
+            now = time.time()
+            self._group_last_activity[umo] = now
+
+            if reply:
+                self._append_group_line(umo, '我', reply, proactive_config)
+
+            if not reply:
+                return
+
+            state = self._proactive_states.get(umo)
+            if state is None:
+                # 只有机器人真正发过言的会话才纳入主动聊天，避免在陌生群里突兀发言
+                self._proactive_states[umo] = {
+                    'is_private': is_private,
+                    'sender_id': event.get_sender_id() if is_private else '',
+                    'nickname': event.get_sender_name() if is_private else '',
+                    'earliest_try': now + self._random_silence(proactive_config, is_private),
+                    'last_spoke_at': 0.0,
+                    'daily_date': '',
+                    'daily_count': 0,
+                    'last_messages': [],
+                }
+                logger.info(
+                    f"[Fiscok's][proactive] {'私聊用户' if is_private else '群'}已纳入主动聊天候选：{umo}"
+                )
+            elif is_private:
+                # 刷新私聊用户信息（昵称可能变化）
+                state['sender_id'] = event.get_sender_id()
+                state['nickname'] = event.get_sender_name()
+        except Exception as e:
+            logger.warning(f"[Fiscok's][proactive] 记录群活跃状态失败，不影响主流程: {e}")
 
     @filter.on_llm_response()
     async def on_llm_response_hook(self, event: AstrMessageEvent, resp):
@@ -1153,6 +1628,65 @@ class Core(Star):
         self.data_manager.clear_topics()
         yield event.plain_result("已清空话题记忆库")
 
+    # --- 人设演化管理指令组 ---
+    @filter.command_group('persona_manager', alias={'人设管理'})
+    def persona_manager(self):
+        pass
+
+    @persona_manager.command('show', alias={'查看'})
+    async def persona_show(self, event: AstrMessageEvent):
+        record = self.data_manager.get_evolved_persona()
+        persona = (record.get('persona', '') or '').strip()
+        if not persona:
+            yield event.plain_result("当前还没有演化出自我设定（开启人设演化并聊天一段时间后会自动形成）")
+            return
+        lines = ["当前自我设定：", persona]
+        if record.get('updated_at'):
+            lines.append(f"更新时间：{record['updated_at']}")
+        if record.get('reason'):
+            lines.append(f"最近调整原因：{record['reason']}")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @persona_manager.command('evolve', alias={'演化一次'})
+    async def persona_evolve(self, event: AstrMessageEvent):
+        persona_config = self.config.get('persona_evolution_config', {})
+        dialogue = '\n'.join(self._persona_recent.get(event.unified_msg_origin, []))
+        if not dialogue:
+            yield event.plain_result("当前会话的参考素材为空，先聊几句再试")
+            return
+        result = await evolve_persona(
+            self.context,
+            provider_id=persona_config.get('llm_provider_id', ''),
+            current_persona=self._persona_overlay,
+            dialogue=dialogue,
+            max_chars=int(persona_config.get('max_chars', 200) or 200),
+        )
+        if not result:
+            yield event.plain_result("演化失败（模型不可用或返回内容无法解析），请查看日志")
+            return
+        if not result.get('changed'):
+            yield event.plain_result("模型认为当前设定无需调整")
+            return
+        persona = (result.get('persona', '') or '').strip()
+        if not persona:
+            yield event.plain_result("模型没有返回有效的自我设定")
+            return
+        if self.data_manager.save_evolved_persona(persona, result.get('reason', '')):
+            self._persona_overlay = persona
+            yield event.plain_result(f"人设已更新：\n{persona}")
+        else:
+            yield event.plain_result("保存人设失败，请查看日志")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @persona_manager.command('reset', alias={'重置'})
+    async def persona_reset(self, event: AstrMessageEvent):
+        self.data_manager.reset_evolved_persona()
+        self._persona_overlay = ''
+        self._persona_recent.clear()
+        self._persona_reply_count = 0
+        yield event.plain_result("已重置自我设定，回到只使用原生人设的状态")
+
     # --- Instagram 缓存更新 ---
     async def instagram_cache_update(self):
         """
@@ -1360,6 +1894,9 @@ class Core(Star):
             task.cancel()
         self._background_tasks.clear()
         self._topic_sessions.clear()
+        self._group_recent.clear()
+        self._proactive_states.clear()
+        self._persona_recent.clear()
         await close_aux_providers()
 
         self.data_manager = None

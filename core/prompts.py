@@ -82,10 +82,26 @@ EMOTION_ANALYSIS_PROMPT = """你是聊天机器人（角色扮演的虚拟形象
 用户消息：{message}"""
 
 # 情绪/好感度状态注入提示词（添加到主 LLM 的 system_prompt 中）
-# 使用时需要格式化 nickname、emotion、affinity
+# 使用时需要格式化 nickname、emotion、affinity、attitude
 EMOTION_STATE_INJECTION = """
-<状态>情绪：{emotion}｜对{nickname}好感度：{affinity}</状态>
-据此调整语气与态度：情绪/好感度越高越热情，越低越冷淡。"""
+<关系状态>
+当前情绪：{emotion}
+对{nickname}的好感度：{affinity}/100（{attitude}）
+表达要求：把情绪和好感度体现在语气、称呼、亲近程度与聊什么上——好感度越高越自然亲近（可以开玩笑、主动关心、分享自己的事），越低越客气疏离；情绪低落/烦躁时语气相应收敛，情绪好时更活泼。不要复述或提及这些数值。
+</关系状态>"""
+
+
+def _attitude_label(affinity: int) -> str:
+    """把好感度数值映射为关系描述，帮助模型理解程度"""
+    if affinity >= 80:
+        return '很亲近'
+    if affinity >= 60:
+        return '比较熟悉'
+    if affinity >= 40:
+        return '普通'
+    if affinity >= 20:
+        return '有点疏远'
+    return '明显疏远'
 
 
 def format_emotion_analysis_prompt(current_emotion: str, nickname: str, message: str) -> str:
@@ -119,7 +135,67 @@ def format_emotion_state_injection(nickname: str, emotion: str, affinity: int) -
     Returns:
         格式化后的提示词
     """
-    return EMOTION_STATE_INJECTION.format(nickname=nickname, emotion=emotion, affinity=affinity)
+    return EMOTION_STATE_INJECTION.format(
+        nickname=nickname,
+        emotion=emotion,
+        affinity=affinity,
+        attitude=_attitude_label(affinity),
+    )
+
+
+# ==================== 人设演化（自我设定）相关提示词 ====================
+
+# 人设演化系统提示词
+PERSONA_EVOLUTION_SYSTEM_PROMPT = ("你是聊天机器人的自我设定维护器，负责根据机器人自己的聊天表现，"
+                                  "小幅调整它可以演化的自我设定。只返回 JSON，不要返回其他内容。")
+
+# 人设演化提示词（使用时需要格式化 current、dialogue、max_chars）
+PERSONA_EVOLUTION_PROMPT = """你在维护自己的“自我设定”，即可以随相处自然变化的部分：说话习惯、语气、偏好、兴趣、自称、口头禅、与人的相处方式。
+
+当前自我设定：
+{current}
+
+最近你参与的对话（“我”代表你自己）：
+{dialogue}
+
+请判断是否需要小幅演化，返回 JSON：
+{{
+  "changed": true 或 false,
+  "persona": "演化后的自我设定（第一人称，{max_chars} 字以内，可直接注入使用）",
+  "reason": "这次调整的原因（20 字以内）"
+}}
+规则：
+- 只能调整表达习惯、偏好、兴趣、口头禅、相处方式；不得改动身份、世界观、底线与安全规则
+- 一次只做小幅调整，保持前后连贯；信息不足时 changed=false 并原样返回当前设定
+- 不要写入具体用户的隐私或聊天原文，不要提及“演化”“设定”等元信息
+只返回 JSON，不要返回其他内容。"""
+
+# 自我设定注入（放入 system_prompt，与 AstrBot 原生人设叠加生效）
+PERSONA_OVERLAY_INJECTION = """
+<自我设定>
+{persona}
+</自我设定>"""
+
+
+def format_persona_evolution_prompt(current: str, dialogue: str, max_chars: int) -> str:
+    """
+    格式化人设演化提示词
+    """
+    return PERSONA_EVOLUTION_PROMPT.format(
+        current=current or "（暂无，可在本次对话中形成）",
+        dialogue=dialogue or "（无）",
+        max_chars=max_chars,
+    )
+
+
+def format_persona_overlay_injection(persona: str) -> str:
+    """
+    格式化自我设定注入文本（空设定返回空字符串）
+    """
+    persona = (persona or "").strip()
+    if not persona:
+        return ""
+    return PERSONA_OVERLAY_INJECTION.format(persona=persona)
 
 
 # ==================== 话题记忆相关提示词 ====================
@@ -232,4 +308,67 @@ def format_topic_tracking_prompt(topic: str, recent: str, nickname: str, message
         recent=recent or "（无）",
         nickname=nickname,
         message=message,
+    )
+
+
+# ==================== 主动发起聊天（冷场救场）相关提示词 ====================
+
+# 主动发言系统提示词（与人格设定拼接使用）
+PROACTIVE_CHAT_SYSTEM_PROMPT = (
+    "你是这个群里的普通群友，用手机随手打字聊天，不是客服，也不是定时播报机器人。"
+    "你的话要有生活痕迹：具体、随意、有情绪，允许半句话和语气词。"
+    "只输出要发到群里的那段话本身；如果此刻开口会显得突兀或打扰，只输出 [SKIP]。"
+)
+
+# 主动发言提示词（使用时需要格式化 time_desc、recent、last）
+PROACTIVE_CHAT_PROMPT = """现在是 {time_desc}。
+群聊最近的记录：
+{recent}
+
+你最近在群里说过的话（不要重复这些内容或句式）：
+{last}
+
+请自然地发一条群消息，发起或延续一个轻松的话题：
+- 1~2 句，像随手打出来的，不要客服腔、不要“大家好”式开场、不要总结、不要列表
+- 优先顺着最近的聊天接话；如果最近没什么内容，就发起一个具体的小话题（吐槽、好奇、分享一件小事、问一个具体的小问题）
+- 不要每次都在问“在不在”“在干嘛”“吃饭了吗”
+- 如果现在开口会显得突兀或打扰，只输出 [SKIP]
+只输出消息内容本身。"""
+
+
+def format_proactive_chat_prompt(time_desc: str, recent: str, last: str) -> str:
+    """
+    格式化主动发起聊天提示词
+    """
+    return PROACTIVE_CHAT_PROMPT.format(
+        time_desc=time_desc or "某个时间",
+        recent=recent or "（无）",
+        last=last or "（无）",
+    )
+
+
+# 私聊主动发起（陪伴向）提示词（使用时需要格式化 time_desc、nickname、recent、last）
+PRIVATE_PROACTIVE_CHAT_PROMPT = """现在是 {time_desc}。
+你和「{nickname}」的私聊最近记录：
+{recent}
+
+你最近主动发过的消息（不要重复这些内容或句式）：
+{last}
+
+请自然地发一条私聊消息，重点是陪伴感：
+- 1~2 句，像真人随手发的，可以关心对方近况、接着上次聊的话题、分享自己的一件小事
+- 不要查岗、不要连续追问、不要“在吗”式开场、不要客服腔
+- 如果现在发消息会打扰对方（比如对方刚说要睡了），只输出 [SKIP]
+只输出消息内容本身。"""
+
+
+def format_private_proactive_chat_prompt(time_desc: str, nickname: str, recent: str, last: str) -> str:
+    """
+    格式化私聊主动发起（陪伴向）提示词
+    """
+    return PRIVATE_PROACTIVE_CHAT_PROMPT.format(
+        time_desc=time_desc or "某个时间",
+        nickname=nickname or "对方",
+        recent=recent or "（无）",
+        last=last or "（无）",
     )

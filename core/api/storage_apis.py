@@ -21,6 +21,7 @@ class DataManager:
         self.instagram_cache_root = self.root / 'instagram_cache'
         self.affinity_root = self.root / 'affinity'
         self.topic_memory_root = self.root / 'topic_memory'
+        self.persona_root = self.root / 'persona'
 
         self.config = config
 
@@ -41,6 +42,7 @@ class DataManager:
             self.instagram_cache_root.mkdir(parents=True, exist_ok=True)
             self.affinity_root.mkdir(parents=True, exist_ok=True)
             self.topic_memory_root.mkdir(parents=True, exist_ok=True)
+            self.persona_root.mkdir(parents=True, exist_ok=True)
 
             logger.info('[DataManager] 已完成数据目录构建]')
         else:
@@ -50,6 +52,7 @@ class DataManager:
             self.instagram_cache_root.mkdir(parents=True, exist_ok=True)
             self.affinity_root.mkdir(parents=True, exist_ok=True)
             self.topic_memory_root.mkdir(parents=True, exist_ok=True)
+            self.persona_root.mkdir(parents=True, exist_ok=True)
 
     # --- bilibili视频统计基础组件 ---
     def _get_group_file(self, group_id: str) -> Path:
@@ -1134,3 +1137,55 @@ class DataManager:
         """清空话题记忆库"""
         self._save_topic_db([])
         logger.info("[DataManager][clear_topics]已清空话题记忆库")
+
+    # --- 人设演化（自我设定）存储 ---
+    def _get_persona_file(self) -> Path:
+        """获取演化人设文件路径"""
+        return self.persona_root / 'evolved_persona.json'
+
+    def get_evolved_persona(self) -> Dict:
+        """读取演化人设，文件不存在或损坏则返回空记录"""
+        file = self._get_persona_file()
+        if not file.exists():
+            return {}
+        try:
+            with open(file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            logger.error(f"[DataManager][get_evolved_persona]解析人设文件失败，文件可能损坏: {file}")
+            return {}
+
+    def save_evolved_persona(self, persona: str, reason: str = "") -> bool:
+        """
+        保存演化人设（覆盖写入，附带更新时间与原因）
+
+        :param persona: 自我设定文本
+        :param reason: 本次调整原因
+        :return: 是否保存成功
+        """
+        try:
+            persona = (persona or '').strip()
+            if not persona:
+                return False
+            file = self._get_persona_file()
+            file.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "persona": persona,
+                "reason": (reason or '').strip(),
+                "updated_at": datetime.now().isoformat(),
+            }
+            with open(file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info(f"[DataManager][save_evolved_persona]已更新人设：{persona[:40]}")
+            return True
+        except Exception as e:
+            logger.error(f"[DataManager][save_evolved_persona]保存人设失败: {e}", exc_info=True)
+            return False
+
+    def reset_evolved_persona(self):
+        """清除演化人设，回到无人设叠加状态"""
+        file = self._get_persona_file()
+        if file.exists():
+            file.unlink()
+        logger.info("[DataManager][reset_evolved_persona]已重置人设")

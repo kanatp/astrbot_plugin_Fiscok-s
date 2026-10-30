@@ -292,6 +292,115 @@
       }
     }
   },
+  "proactive_chat_config": {
+    "description": "主动发起聊天（群聊冷场时主动开口）配置",
+    "type": "object",
+    "items": {
+      "available": {
+        "description": "是否启用主动发起聊天（群里冷场时主动开口，仅对机器人发过言的群生效）",
+        "type": "bool",
+        "default": false
+      },
+      "llm_provider_id": {
+        "description": "主动发言生成所用辅助 LLM Provider（高温，冷场时调用）",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空时使用第一个可用的模型；辅助调用会自动关闭思考模式。建议使用便宜且文风自然的模型"
+      },
+      "check_interval_seconds": {
+        "description": "后台检查冷场的间隔（秒）",
+        "type": "int",
+        "default": 60
+      },
+      "min_silence_minutes": {
+        "description": "群聊至少安静多少分钟后才可能主动开口（分钟）",
+        "type": "int",
+        "default": 30
+      },
+      "max_silence_minutes": {
+        "description": "随机等待间隔的上限（分钟），每次开口后在上下限之间重新随机",
+        "type": "int",
+        "default": 90
+      },
+      "quiet_hours_start": {
+        "description": "安静时段开始小时（0-23，与结束小时相同表示不限制）",
+        "type": "int",
+        "default": 0
+      },
+      "quiet_hours_end": {
+        "description": "安静时段结束小时（0-23，默认 0 与 7 表示 0~7 点不主动发言）",
+        "type": "int",
+        "default": 7
+      },
+      "speak_probability": {
+        "description": "冷场满足后实际开口的概率（0~1，保留随机性，避免机械定时）",
+        "type": "float",
+        "default": 0.6
+      },
+      "daily_limit_per_group": {
+        "description": "每个群每天最多主动发言次数（0 表示不限制）",
+        "type": "int",
+        "default": 6
+      },
+      "cooldown_minutes": {
+        "description": "两次主动发言之间的最短间隔（分钟）",
+        "type": "int",
+        "default": 20
+      },
+      "recent_lines": {
+        "description": "生成时参考的最近群聊消息条数",
+        "type": "int",
+        "default": 8
+      },
+      "recent_line_chars": {
+        "description": "最近群聊消息单条截断字符数（0 表示不限制）",
+        "type": "int",
+        "default": 80
+      },
+      "last_messages": {
+        "description": "生成时提供给自己最近主动说过的话条数（避免重复内容或句式）",
+        "type": "int",
+        "default": 3
+      },
+      "max_chars": {
+        "description": "单次主动消息最大字符数（超出截断，0 表示不限制）",
+        "type": "int",
+        "default": 120
+      },
+      "group_whitelist": {
+        "description": "生效群聊白名单（群号或 umo，逗号分隔；留空表示所有机器人发过言的群）",
+        "type": "string",
+        "default": ""
+      },
+      "private_available": {
+        "description": "是否启用私聊主动发起（陪伴向，仅对下方白名单用户生效）",
+        "type": "bool",
+        "default": false
+      },
+      "private_whitelist": {
+        "description": "私聊主动的用户白名单（QQ 号，逗号分隔；留空则私聊主动不生效）",
+        "type": "string",
+        "default": "",
+        "hint": "示例：123456789,987654321。只有这些用户会收到机器人的主动私聊"
+      },
+      "private_min_silence_minutes": {
+        "description": "私聊至少安静多少分钟后才可能主动发消息（分钟）",
+        "type": "int",
+        "default": 120
+      },
+      "private_max_silence_minutes": {
+        "description": "私聊随机等待间隔的上限（分钟），每次发消息后在上下限之间重新随机",
+        "type": "int",
+        "default": 360
+      },
+      "private_daily_limit": {
+        "description": "每个私聊用户每天最多主动发消息次数（0 表示不限制）",
+        "type": "int",
+        "default": 3
+      }
+    }
+  },
   "context_optimize_config": {
     "description": "上下文精简（降低上下文 token 开销）",
     "type": "object",
@@ -310,6 +419,44 @@
         "description": "上下文总字符上限（超出则丢弃更早消息；0 表示不限制）",
         "type": "int",
         "default": 0
+      }
+    }
+  },
+  "persona_evolution_config": {
+    "description": "人设演化（让模型自己小幅修订人设）",
+    "type": "object",
+    "items": {
+      "available": {
+        "description": "是否启用人设演化（插件维护一份可演化的自我设定，与原生人设叠加注入）",
+        "type": "bool",
+        "default": false
+      },
+      "llm_provider_id": {
+        "description": "人设演化所用辅助 LLM Provider",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空时使用第一个可用模型；建议使用轻量模型，演化在后台异步执行"
+      },
+      "evolve_every_messages": {
+        "description": "机器人每回复多少条消息后尝试一次人设演化（0 表示不自动演化）",
+        "type": "int",
+        "default": 10
+      },
+      "review_recent_lines": {
+        "description": "演化时参考的最近对话条数",
+        "type": "int",
+        "default": 8
+      },
+      "review_line_chars": {
+        "description": "参考对话单条截断字符数",
+        "type": "int",
+        "default": 80
+      },
+      "max_chars": {
+        "description": "自我设定最大字符数（超出截断，控制注入开销）",
+        "type": "int",
+        "default": 200
       }
     }
   }
