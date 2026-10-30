@@ -42,7 +42,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from typing import List, Dict, Any
 import re
 
-@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "1.0")
+@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "2.2")
 class Core(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
