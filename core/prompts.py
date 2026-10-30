@@ -193,3 +193,43 @@ def format_topic_memory_injection(topics) -> str:
     if not items:
         return ""
     return TOPIC_MEMORY_INJECTION_HEAD + "\n".join(items) + "\n" + TOPIC_MEMORY_INJECTION_TAIL
+
+
+# ==================== 群聊话题跟踪（续聊）相关提示词 ====================
+
+# 话题续聊判定系统提示词
+TOPIC_TRACKING_SYSTEM_PROMPT = ("你是群聊话题跟踪判定器，负责判断新消息是否与正在进行的话题相关、"
+                                "是否应当续聊，以及该话题是否应当结束。只返回 JSON，不要返回其他内容。")
+
+# 话题续聊判定提示词（使用时需要格式化 topic、recent、nickname、message）
+TOPIC_TRACKING_PROMPT = """当前正在进行的群聊话题（由你的上一轮发言开启）：
+{topic}
+
+最近的群聊记录：
+{recent}
+
+新消息（{nickname}）：
+{message}
+
+请判断并返回 JSON：
+{{
+  "respond": 是否应针对这条消息发言（与当前话题相关且你有话可说为 true；明显无关、话题已自然结束、或此时插话显得突兀为 false）,
+  "end": 该话题是否应当结束、你不再继续参与（话题已收尾、对方明显转向新话题、或继续参与已不合适为 true）
+}}
+只返回 JSON，不要返回其他内容。"""
+
+# 续聊回复时注入的简短说明（放入 system_prompt）
+TOPIC_TRACKING_REPLY_INJECTION = """
+<话题续聊>你正在群聊中参与一个话题，请自然接续，不要重复已说过的话；若话题已自然收尾，简短回应即可。</话题续聊>"""
+
+
+def format_topic_tracking_prompt(topic: str, recent: str, nickname: str, message: str) -> str:
+    """
+    格式化话题续聊判定提示词
+    """
+    return TOPIC_TRACKING_PROMPT.format(
+        topic=topic or "（无）",
+        recent=recent or "（无）",
+        nickname=nickname,
+        message=message,
+    )

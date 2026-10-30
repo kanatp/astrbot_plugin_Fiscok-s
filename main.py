@@ -16,10 +16,12 @@ from .core.api.topic_memory_apis import (
     retrieve_topics,
     resolve_embedding_provider,
 )
+from .core.api.topic_tracking_apis import decide_topic_continuation
 from .core.prompts import (
     format_meme_placeholder_injection,
     format_emotion_state_injection,
     format_topic_memory_injection,
+    TOPIC_TRACKING_REPLY_INJECTION,
 )
 from .core.net.twitter_fetch import fetch_twitter_data, check_availability
 from .core.net.instagram_fetch import create_loader, fetch_instagram_posts, fetch_instagram_stories, check_instagram_access
@@ -27,6 +29,7 @@ from .core.net.instagram_fetch import create_loader, fetch_instagram_posts, fetc
 import subprocess
 import asyncio
 import random
+import time
 import aiohttp
 import aiofiles
 import json
@@ -53,6 +56,9 @@ class Core(Star):
         self._emotion_lock = asyncio.Lock()
         self._emotion_pending: set = set()
         self._topic_pending: set = set()
+
+        # 群聊话题跟踪会话（umo -> 会话状态），仅内存驻留
+        self._topic_sessions: Dict[str, Dict] = {}
 
         self.rssHub_base_url = self.config.get('twitter_subscription_config', {}).get("rssHub_url", "")
         self.rssHub_port = self.config.get('twitter_subscription_config', {}).get("rssHub_port", 1200)
@@ -179,6 +185,110 @@ class Core(Star):
         if not sender_id or sender_id == event.get_self_id():
             return
         self._schedule_topic_learning(sender_id, event.get_sender_name(), message, topic_config)
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def topic_tracking_on_message(self, event: AstrMessageEvent):
+        """
+        群聊话题跟踪：机器人发言后开启话题，在话题存续期间判定新消息是否相关，
+        由模型决定是否续聊以及何时结束参与
+        """
+        track_config = self.config.get('topic_tracking_config', {})
+        if not track_config.get('available', False):
+            return
+
+        # 仅处理群聊，且只跟踪他人消息（忽略机器人自己发出的消息）
+        if not event.get_group_id():
+            return
+        sender_id = event.get_sender_id()
+        if not sender_id or sender_id == event.get_self_id():
+            return
+
+        umo = event.unified_msg_origin
+        session = self._topic_sessions.get(umo)
+        if session is None:
+            return
+
+        message = (event.message_str or '').strip()
+        # 忽略空消息与斜杠指令
+        if not message or message.startswith(('/', '／')):
+            return
+
+        nickname = event.get_sender_name() or '群友'
+        ttl = float(track_config.get('ttl_seconds', 90) or 0)
+
+        # 空闲超时：长时间无人继续该话题则结束
+        if ttl > 0 and time.time() - session.get('last_active', 0) > ttl:
+            self._end_topic_session(umo, '空闲超时')
+            return
+
+        self._append_recent(session, nickname, message, track_config)
+
+        # 被 @/唤醒：本体将直接回复，此处只记录并保活
+        if event.is_at_or_wake_command:
+            session['last_active'] = time.time()
+            return
+
+        max_rounds = int(track_config.get('max_rounds', 8) or 0)
+        if max_rounds > 0 and session.get('auto_rounds', 0) >= max_rounds:
+            self._end_topic_session(umo, '达到最大续聊轮数')
+            return
+
+        # 同一话题串行判定，避免多条消息并发触发重复回复
+        async with session['lock']:
+            # 等待锁期间话题可能已被结束或重建
+            if self._topic_sessions.get(umo) is not session:
+                return
+            if ttl > 0 and time.time() - session.get('last_active', 0) > ttl:
+                self._end_topic_session(umo, '空闲超时')
+                return
+            decision = await decide_topic_continuation(
+                self.context,
+                provider_id=track_config.get('llm_provider_id', ''),
+                nickname=nickname,
+                message=message,
+                topic=session.get('topic', ''),
+                # 最后一条是当前消息本身，已单独作为「新消息」传入
+                recent=list(session.get('recent', []))[:-1],
+            )
+
+        # 判定失败时不发言，避免误触发
+        if not decision:
+            logger.info(f"[Fiscok's][track] 判定无结果，跳过本次发言：{nickname}：{message[:40]}")
+            return
+
+        logger.info(
+            f"[Fiscok's][track] 判定结果 respond={decision.get('respond')} "
+            f"end={decision.get('end')} | {nickname}：{message[:40]}"
+        )
+
+        if decision.get('end'):
+            self._end_topic_session(umo, '模型判定话题结束')
+            return
+
+        if not decision.get('respond'):
+            session['idle_rounds'] = session.get('idle_rounds', 0) + 1
+            max_idle = int(track_config.get('max_idle_rounds', 3) or 0)
+            logger.info(
+                f"[Fiscok's][track] 不接话，连续无关 {session['idle_rounds']}/{max_idle} 条"
+            )
+            if max_idle > 0 and session['idle_rounds'] >= max_idle:
+                self._end_topic_session(umo, '连续无关消息')
+            return
+
+        session['auto_rounds'] = session.get('auto_rounds', 0) + 1
+        session['idle_rounds'] = 0
+        session['last_active'] = time.time()
+
+        conversation = await self._get_or_create_conversation(event)
+        logger.info(
+            f"[Fiscok's][track] 续聊话题（第 {session['auto_rounds']} 轮，"
+            f"话题：{session.get('topic', '')[:40]}）：{message[:40]}"
+        )
+        yield event.request_llm(
+            prompt=message,
+            conversation=conversation,
+            system_prompt=TOPIC_TRACKING_REPLY_INJECTION,
+        )
 
     @filter.on_llm_request()
     async def on_llm_request_topic_hook(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -410,6 +520,54 @@ class Core(Star):
 
         self._spawn_background(_run())
 
+    def _build_topic_seed(self, trigger: str, reply: str, track_config: Dict) -> str:
+        """
+        构造话题种子（触发消息 + 机器人回复），截断以控制判定 token
+        """
+        seed = f"用户：{trigger}\n我：{reply}" if reply else f"用户：{trigger}"
+        max_chars = int(track_config.get('topic_seed_chars', 80) or 0)
+        if max_chars > 0 and len(seed) > max_chars:
+            seed = seed[:max_chars] + '…'
+        return seed
+
+    @staticmethod
+    def _append_recent(session: Dict, nickname: str, message: str, track_config: Dict):
+        """
+        记录最近群聊消息：单条截断，并按配置保留条数
+        """
+        message = (message or '').strip()
+        if not message:
+            return
+
+        max_chars = int(track_config.get('recent_line_chars', 60) or 0)
+        if max_chars > 0 and len(message) > max_chars:
+            message = message[:max_chars] + '…'
+
+        recent = session.setdefault('recent', [])
+        recent.append(f"{nickname}：{message}")
+
+        max_lines = int(track_config.get('recent_lines', 4) or 0)
+        if max_lines > 0 and len(recent) > max_lines:
+            del recent[:len(recent) - max_lines]
+
+    def _end_topic_session(self, umo: str, reason: str):
+        """结束话题跟踪会话"""
+        if self._topic_sessions.pop(umo, None) is not None:
+            logger.info(f"[Fiscok's][track] 结束话题跟踪（{reason}）")
+
+    async def _get_or_create_conversation(self, event: AstrMessageEvent):
+        """
+        获取当前群聊对话，不存在时创建，用于续聊时复用上下文
+        """
+        umo = event.unified_msg_origin
+        manager = self.context.conversation_manager
+        conversation_id = await manager.get_curr_conversation_id(umo)
+        if not conversation_id:
+            conversation_id = await manager.new_conversation(
+                umo, platform_id=event.get_platform_id()
+            )
+        return await manager.get_conversation(umo, conversation_id)
+
     def _spawn_background(self, coro):
         """将协程放入后台执行，并持有引用避免被 GC 回收"""
         task = asyncio.create_task(coro)
@@ -552,6 +710,51 @@ class Core(Star):
         except Exception as e:
             logger.error(f"[Fiscok's][meme] 下载图片异常: {e}", exc_info=True)
             return False
+
+    @filter.on_llm_response()
+    async def on_llm_response_topic_tracking_hook(self, event: AstrMessageEvent, resp):
+        """
+        机器人发言后开启/刷新话题会话：被 @/唤醒触发时以这次发言开启新话题，
+        续聊时仅刷新活跃时间
+        """
+        track_config = self.config.get('topic_tracking_config', {})
+        if not track_config.get('available', False):
+            return
+
+        if not event.get_group_id():
+            return
+
+        try:
+            reply = (getattr(resp, 'completion_text', '') or '').strip()
+            trigger = (event.message_str or '').strip()
+            if not reply and not trigger:
+                return
+
+            umo = event.unified_msg_origin
+            now = time.time()
+            session = self._topic_sessions.get(umo)
+
+            if session is None or event.is_at_or_wake_command:
+                # 被 @/唤醒视为开启新话题：覆盖旧会话
+                session = {
+                    'topic': self._build_topic_seed(trigger, reply, track_config),
+                    'started_at': now,
+                    'last_active': now,
+                    'auto_rounds': 0,
+                    'idle_rounds': 0,
+                    'recent': [],
+                    'lock': asyncio.Lock(),
+                }
+                self._topic_sessions[umo] = session
+                self._append_recent(session, event.get_sender_name() or '群友', trigger, track_config)
+                self._append_recent(session, '我', reply, track_config)
+                logger.info(f"[Fiscok's][track] 开启话题跟踪：{session['topic'][:60]}")
+            else:
+                # 续聊回复：刷新活跃时间，并记录自己的发言
+                session['last_active'] = now
+                self._append_recent(session, '我', reply, track_config)
+        except Exception as e:
+            logger.warning(f"[Fiscok's][track] 更新话题会话失败，不影响主流程: {e}")
 
     @filter.on_llm_response()
     async def on_llm_response_hook(self, event: AstrMessageEvent, resp):
@@ -1156,6 +1359,7 @@ class Core(Star):
         for task in list(self._background_tasks):
             task.cancel()
         self._background_tasks.clear()
+        self._topic_sessions.clear()
         await close_aux_providers()
 
         self.data_manager = None
