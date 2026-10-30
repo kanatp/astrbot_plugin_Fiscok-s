@@ -42,6 +42,29 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from typing import List, Dict, Any
 import re
 
+# 模型偶尔会把 AstrBot 注入的内部提示（<system_reminder> 等）原样复述给用户，
+# 这里统一在发送前清理，避免内部信息泄露
+_INTERNAL_REMINDER_BLOCK = re.compile(r'<system_reminder>.*?</system_reminder>', re.S | re.I)
+_INTERNAL_REMINDER_TAG = re.compile(r'</?system_reminder>', re.I)
+_INTERNAL_META_LINES = (
+    re.compile(r'^\s*User ID:\s*\S+\s*,\s*Nickname:.*$', re.M | re.I),
+    re.compile(r'^\s*Current datetime:\s*.*Weekday:.*$', re.M | re.I),
+    re.compile(r'^\s*Group name:\s+.*$', re.M | re.I),
+)
+
+
+def _strip_internal_leaks(text: str) -> str:
+    """清除模型误复述的内部提示与元信息行"""
+    if not text:
+        return text
+    text = _INTERNAL_REMINDER_BLOCK.sub('', text)
+    text = _INTERNAL_REMINDER_TAG.sub('', text)
+    for pattern in _INTERNAL_META_LINES:
+        text = pattern.sub('', text)
+    text = re.sub(r'\n{3,}', '\n\n', text).strip()
+    return text
+
+
 @register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "2.2")
 class Core(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -946,6 +969,11 @@ class Core(Star):
     async def _send_proactive(self, umo: str, text: str, cfg: Dict, is_private: bool = False) -> bool:
         """发送主动消息；开启分段发送时按换行拆成多条，更像真人。
         返回是否发送成功"""
+        # 主动发言不经过主流程的消息装饰钩子，这里同样清理内部提示
+        text = _strip_internal_leaks(text)
+        if not text:
+            return False
+
         seg_cfg = self.config.get('segmented_parser_config', {})
         if seg_cfg.get('available', False):
             lines = [line.strip() for line in text.split('\n') if line.strip()]
@@ -1293,6 +1321,28 @@ class Core(Star):
 
         except Exception as e:
             logger.error(f"[Fiscok's][meme] 处理 LLM 响应时出错: {e}", exc_info=True)
+
+    @filter.on_decorating_result()
+    async def on_decorating_result_sanitize_hook(self, event: AstrMessageEvent):
+        """
+        发送前兜底清理：若模型把 <system_reminder>（用户 ID、昵称、时间等内部提示）
+        原样复述出来，则在此删除对应内容，避免内部信息发给用户
+        """
+        result = event.get_result()
+        if result is None or not result.is_model_result() or not result.chain:
+            return
+
+        try:
+            cleaned = []
+            for component in result.chain:
+                if isinstance(component, Plain):
+                    component.text = _strip_internal_leaks(component.text)
+                    if not component.text:
+                        continue
+                cleaned.append(component)
+            result.chain = cleaned
+        except Exception as e:
+            logger.error(f"[Fiscok's][sanitize] 清理回复中的内部提示失败: {e}")
 
     @filter.on_decorating_result()
     async def on_decorating_result_hook(self, event: AstrMessageEvent):
