@@ -275,6 +275,12 @@
         "type": "int",
         "default": 180
       },
+      "reply_probability": {
+        "description": "同一话题内收到相关消息时，实际接话的概率（0~1，1 表示每条都接；调低可减少话密）",
+        "type": "float",
+        "default": 0.6,
+        "hint": "例如 0.4 表示相关消息里约 40% 会接话，其余保持沉默"
+      },
       "recent_lines": {
         "description": "判定时携带的最近群聊消息条数",
         "type": "int",

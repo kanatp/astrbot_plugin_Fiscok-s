@@ -330,6 +330,14 @@ class Core(Star):
             )
             return
 
+        # 相关性达标也按概率接话，避免同一话题里话太密
+        reply_probability = float(track_config.get('reply_probability', 0.6) or 0)
+        if reply_probability < 1.0 and random.random() >= reply_probability:
+            logger.info(
+                f"[Fiscok's][track] 概率跳过本次接话（{reply_probability:.2f}）：{nickname}：{message[:40]}"
+            )
+            return
+
         session['auto_rounds'] = session.get('auto_rounds', 0) + 1
         session['idle_since'] = 0
         session['last_active'] = time.time()
@@ -1033,7 +1041,7 @@ class Core(Star):
             'recent': list(recent),
             'lock': asyncio.Lock(),
         }
-        logger.info(f"[Fiscok's][track] 由主动发言开启话题跟踪：{topic[:60]}")
+        logger.info(f"[Fiscok's][track] 开启话题跟踪：{topic[:60]}")
 
     def _spawn_background(self, coro):
         """将协程放入后台执行，并持有引用避免被 GC 回收"""
@@ -1202,20 +1210,16 @@ class Core(Star):
             session = self._topic_sessions.get(umo)
 
             if session is None or event.is_at_or_wake_command:
-                # 被 @/唤醒视为开启新话题：覆盖旧会话
-                session = {
-                    'topic': self._build_topic_seed(trigger, reply, track_config),
-                    'started_at': now,
-                    'last_active': now,
-                    'auto_rounds': 0,
-                    'idle_since': 0.0,
-                    'recent': [],
-                    'lock': asyncio.Lock(),
-                }
-                self._topic_sessions[umo] = session
+                # 被 @/唤醒视为开启新话题：覆盖旧会话，与主动发言共用同一开启链路
+                self._start_topic_session(
+                    umo,
+                    self._build_topic_seed(trigger, reply, track_config),
+                    [],
+                    track_config,
+                )
+                session = self._topic_sessions[umo]
                 self._append_recent(session, event.get_sender_name() or '群友', trigger, track_config)
                 self._append_recent(session, '我', reply, track_config)
-                logger.info(f"[Fiscok's][track] 开启话题跟踪：{session['topic'][:60]}")
             else:
                 # 续聊回复：刷新活跃时间，并记录自己的发言
                 session['last_active'] = now
