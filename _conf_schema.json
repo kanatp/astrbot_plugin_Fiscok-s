@@ -270,10 +270,10 @@
         "type": "int",
         "default": 8
       },
-      "max_idle_rounds": {
-        "description": "连续多少条判定为无关的消息后结束话题",
+      "unrelated_end_seconds": {
+        "description": "判定为无关（或模型认为该收尾）后，持续多少秒仍未续上话题才结束（期间续上一次即重新计时；0 表示不按时间结束）",
         "type": "int",
-        "default": 3
+        "default": 180
       },
       "recent_lines": {
         "description": "判定时携带的最近群聊消息条数",

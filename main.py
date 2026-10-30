@@ -257,16 +257,18 @@ class Core(Star):
         nickname = event.get_sender_name() or '群友'
         ttl = float(track_config.get('ttl_seconds', 90) or 0)
 
-        # 空闲超时：长时间无人继续该话题则结束
+        # 空闲超时：长时间无人发言则结束
         if ttl > 0 and time.time() - session.get('last_active', 0) > ttl:
             self._end_topic_session(umo, '空闲超时')
             return
 
         self._append_recent(session, nickname, message, track_config)
+        # 有新消息即视为群聊仍活跃，空闲超时从最后一条消息开始计算
+        session['last_active'] = time.time()
 
         # 被 @/唤醒：本体将直接回复，此处只记录并保活
         if event.is_at_or_wake_command:
-            session['last_active'] = time.time()
+            session['idle_since'] = 0
             return
 
         max_rounds = int(track_config.get('max_rounds', 8) or 0)
@@ -302,22 +304,34 @@ class Core(Star):
             f"end={decision.get('end')} | {nickname}：{message[:40]}"
         )
 
-        if decision.get('end'):
-            self._end_topic_session(umo, '模型判定话题结束')
-            return
+        # 未续上（无关或模型认为该收尾）不立即结束：
+        # 从这里开始计时，持续到时长仍没人把话题接回来才真正结束；
+        # 期间只要续上一次就重置计时，避免热闹群里一段无关闲聊把话题掐掉
+        if decision.get('end') or not decision.get('respond'):
+            idle_end = float(track_config.get('unrelated_end_seconds', 180) or 0)
+            now = time.time()
+            if not session.get('idle_since'):
+                session['idle_since'] = now
+                if idle_end > 0:
+                    logger.info(
+                        f"[Fiscok's][track] 本次未续上，开始无关计时 {idle_end:.0f}s"
+                        f"（end={decision.get('end')}）：{nickname}：{message[:40]}"
+                    )
+                return
 
-        if not decision.get('respond'):
-            session['idle_rounds'] = session.get('idle_rounds', 0) + 1
-            max_idle = int(track_config.get('max_idle_rounds', 3) or 0)
+            elapsed = now - session['idle_since']
+            if idle_end > 0 and elapsed >= idle_end:
+                self._end_topic_session(umo, f'无关内容持续 {elapsed:.0f}s 未续上')
+                return
+
             logger.info(
-                f"[Fiscok's][track] 不接话，连续无关 {session['idle_rounds']}/{max_idle} 条"
+                f"[Fiscok's][track] 仍未续上，无关计时 {elapsed:.0f}/{idle_end:.0f}s"
+                f"（end={decision.get('end')}）：{nickname}：{message[:40]}"
             )
-            if max_idle > 0 and session['idle_rounds'] >= max_idle:
-                self._end_topic_session(umo, '连续无关消息')
             return
 
         session['auto_rounds'] = session.get('auto_rounds', 0) + 1
-        session['idle_rounds'] = 0
+        session['idle_since'] = 0
         session['last_active'] = time.time()
 
         conversation = await self._get_or_create_conversation(event)
@@ -1015,7 +1029,7 @@ class Core(Star):
             'started_at': now,
             'last_active': now,
             'auto_rounds': 0,
-            'idle_rounds': 0,
+            'idle_since': 0.0,
             'recent': list(recent),
             'lock': asyncio.Lock(),
         }
@@ -1194,7 +1208,7 @@ class Core(Star):
                     'started_at': now,
                     'last_active': now,
                     'auto_rounds': 0,
-                    'idle_rounds': 0,
+                    'idle_since': 0.0,
                     'recent': [],
                     'lock': asyncio.Lock(),
                 }
