@@ -39,8 +39,17 @@ import aiofiles
 import json
 from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import re
+
+# 回复贴表情：常用 QQ 表情 ID（OneBot face 段），配置里用中文名或直接写数字 ID
+FACE_PRESETS = {
+    '微笑': 14, '调皮': 12, '呲牙': 13, '偷笑': 20, '可爱': 21, '白眼': 22,
+    '得意': 4, '流泪': 5, '害羞': 6, '大哭': 9, '酷': 16, '疑问': 32,
+    '流汗': 27, '憨笑': 28, '滑稽': 87, '赞': 75, '玫瑰': 66, '拥抱': 49,
+    '抓狂': 18, '傲慢': 23, '悠闲': 29, '衰': 36, '再见': 39,
+    '呲牙笑': 13, '睡': 8, '难过': 15, '发怒': 11, '尴尬': 10,
+}
 
 # 模型偶尔会把 AstrBot 注入的内部提示（<system_reminder> 等）原样复述给用户，
 # 这里统一在发送前清理，避免内部信息泄露
@@ -1035,6 +1044,30 @@ class Core(Star):
         }
         logger.info(f"[Fiscok's][track] 开启话题跟踪：{topic[:60]}")
 
+    def _maybe_pick_face_id(self) -> Optional[int]:
+        """按概率决定本次是否给收到的消息贴一个 QQ 表情，返回表情 ID 或 None"""
+        face_config = self.config.get('face_config', {})
+        if not face_config.get('available', False):
+            return None
+
+        probability = float(face_config.get('probability', 0.08) or 0)
+        if probability <= 0 or random.random() >= probability:
+            return None
+
+        raw = str(face_config.get('faces', '') or '')
+        candidates = []
+        for name in re.split(r'[,，\s]+', raw):
+            name = name.strip()
+            if not name:
+                continue
+            if name.isdigit():
+                candidates.append(int(name))
+            elif name in FACE_PRESETS:
+                candidates.append(FACE_PRESETS[name])
+        if not candidates:
+            return None
+        return random.choice(candidates)
+
     def _spawn_background(self, coro):
         """将协程放入后台执行，并持有引用避免被 GC 回收"""
         task = asyncio.create_task(coro)
@@ -1432,6 +1465,44 @@ class Core(Star):
             event.clear_result()
         except Exception as e:
             logger.error(f"[Fiscok's][segmented] 分段发送失败: {e}", exc_info=True)
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def face_react_on_message(self, event: AstrMessageEvent):
+        """
+        收到消息后按概率给这条消息贴一个 QQ 表情回应
+        （调用协议端 set_msg_emoji_like，不支持时静默跳过）
+        """
+        face_id = self._maybe_pick_face_id()
+        if face_id is None:
+            return
+
+        sender_id = event.get_sender_id()
+        if not sender_id or sender_id == event.get_self_id():
+            return
+
+        message = (event.message_str or '').strip()
+        if not message or message.startswith(('/', '／')):
+            return
+
+        # 默认只在话题进行中贴表情：机器人没接话时也能刷存在感，更像在听
+        face_config = self.config.get('face_config', {})
+        if face_config.get('only_in_topic', True) and not self._topic_sessions.get(event.unified_msg_origin):
+            return
+
+        message_id = getattr(event.message_obj, 'message_id', None)
+        api = getattr(getattr(event, 'bot', None), 'api', None)
+        if not message_id or not hasattr(api, 'call_action'):
+            return
+
+        try:
+            if str(message_id).isdigit():
+                message_id = int(message_id)
+            await api.call_action(
+                'set_msg_emoji_like', message_id=message_id, emoji_id=str(face_id)
+            )
+            logger.info(f"[Fiscok's][face] 已给消息贴表情（{face_id}）：{message[:40]}")
+        except Exception as e:
+            logger.debug(f"[Fiscok's][face] 贴表情失败（可能协议端不支持）: {e}")
 
     async def _send_meme_separately(self, umo: str, meme_path: str):
         """

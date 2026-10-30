@@ -59,6 +59,33 @@
       }
     }
   },
+  "face_config": {
+    "description": "给收到的消息贴 QQ 表情回应（概率触发）",
+    "type": "object",
+    "items": {
+      "available": {
+        "description": "是否给别人的消息贴表情回应",
+        "type": "bool",
+        "default": false
+      },
+      "only_in_topic": {
+        "description": "只在话题进行中贴表情（机器人正在参与某个话题时才回应，没接话时也有在场感）",
+        "type": "bool",
+        "default": true
+      },
+      "probability": {
+        "description": "每条收到的消息被贴表情的概率（建议 0.1 以下，0 表示关闭）",
+        "type": "float",
+        "default": 0.08
+      },
+      "faces": {
+        "description": "候选表情（逗号分隔的中文名或数字 ID，每次随机选一个）",
+        "type": "string",
+        "default": "赞,偷笑,可爱,呲牙",
+        "hint": "可用中文名：微笑/调皮/呲牙/偷笑/可爱/白眼/得意/流泪/害羞/大哭/酷/疑问/流汗/憨笑/滑稽/赞/玫瑰/拥抱/抓狂/傲慢/悠闲/衰/再见/睡/难过/发怒/尴尬；也可直接填表情数字 ID"
+      }
+    }
+  },
   "emotion_config": {
     "description": "情绪与好感度系统配置",
     "type": "object",
