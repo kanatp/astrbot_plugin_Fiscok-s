@@ -401,15 +401,15 @@
         "default": ""
       },
       "private_available": {
-        "description": "是否启用私聊主动发起（陪伴向，仅对下方白名单用户生效）",
+        "description": "是否启用私聊主动发起（陪伴向，仅对下方白名单中的用户生效，留空则全部私聊用户）",
         "type": "bool",
         "default": false
       },
       "private_whitelist": {
-        "description": "私聊主动的用户白名单（QQ 号，逗号分隔；留空则私聊主动不生效）",
+        "description": "私聊主动的用户白名单（QQ 号，逗号分隔；留空则对所有私聊用户生效）",
         "type": "string",
         "default": "",
-        "hint": "示例：123456789,987654321。只有这些用户会收到机器人的主动私聊"
+        "hint": "示例：123456789,987654321。留空表示不限制；只有和机器人聊过天的用户才会被纳入"
       },
       "private_min_silence_minutes": {
         "description": "私聊至少安静多少分钟后才可能主动发消息（分钟）",

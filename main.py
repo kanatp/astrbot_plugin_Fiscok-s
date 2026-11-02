@@ -370,7 +370,7 @@ class Core(Star):
         sender_id = event.get_sender_id()
         if not sender_id or sender_id == event.get_self_id():
             return
-        # 私聊主动仅对白名单用户生效（留空表示不启用）
+        # 私聊主动仅对白名单用户生效（留空表示不限制）
         if is_private and not self._is_user_allowed(sender_id, proactive_config):
             return
 
@@ -779,12 +779,12 @@ class Core(Star):
 
     @staticmethod
     def _is_user_allowed(sender_id: str, cfg: Dict) -> bool:
-        """私聊主动的用户白名单匹配（QQ 号，逗号分隔；留空表示不启用私聊主动）"""
+        """私聊主动的用户白名单匹配（QQ 号，逗号分隔；留空表示不限制，对所有私聊用户生效）"""
         if not sender_id:
             return False
         whitelist = str(cfg.get('private_whitelist', '') or '').strip()
         if not whitelist:
-            return False
+            return True
         items = [item.strip() for item in whitelist.replace('，', ',').split(',') if item.strip()]
         return sender_id in items
 
@@ -906,29 +906,29 @@ class Core(Star):
                 )
                 if now - last_active < min_silence:
                     continue
-                if now < state.get('earliest_try', 0):
+                if now < state.get('next_try', 0):
                     continue
                 if cooldown > 0 and now - state.get('last_spoke_at', 0) < cooldown:
                     continue
 
                 # 冷场满足后也不是必然开口，保留随机性
                 if probability > 0 and random.random() > probability:
-                    state['earliest_try'] = now + self._random_silence(cfg, is_private) * random.uniform(0.5, 1.0)
+                    state['next_try'] = now + self._random_silence(cfg, is_private) * random.uniform(0.5, 1.0)
                     continue
 
                 text = await self._generate_proactive_text(umo, state, cfg)
                 if not text:
-                    state['earliest_try'] = now + self._random_silence(cfg, is_private)
+                    state['next_try'] = now + self._random_silence(cfg, is_private)
                     continue
 
                 if not await self._send_proactive(umo, text, cfg, is_private):
-                    state['earliest_try'] = now + self._random_silence(cfg, is_private)
+                    state['next_try'] = now + self._random_silence(cfg, is_private)
                     continue
 
                 spoke_at = time.time()
                 state['last_spoke_at'] = spoke_at
                 state['daily_count'] = state.get('daily_count', 0) + 1
-                state['earliest_try'] = spoke_at + self._random_silence(cfg, is_private)
+                state['next_try'] = spoke_at + self._random_silence(cfg, is_private)
 
                 last_messages = state.setdefault('last_messages', [])
                 last_messages.append(text)
@@ -1286,7 +1286,7 @@ class Core(Star):
                     'is_private': is_private,
                     'sender_id': event.get_sender_id() if is_private else '',
                     'nickname': event.get_sender_name() if is_private else '',
-                    'earliest_try': now + self._random_silence(proactive_config, is_private),
+                    'next_try': 0.0,
                     'last_spoke_at': 0.0,
                     'daily_date': '',
                     'daily_count': 0,
