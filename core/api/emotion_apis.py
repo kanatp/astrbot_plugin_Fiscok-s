@@ -124,5 +124,10 @@ async def analyze_emotion_state(
         }
 
     except Exception as e:
-        logger.error(f"[emotion_apis] 分析情绪/好感度失败: {e}", exc_info=True)
+        # 上游内容安全过滤属于模型/网关策略，插件无法绕过，降级为 warning 避免刷堆栈
+        error_text = str(e).lower()
+        if '内容安全' in str(e) or 'content_filter' in error_text or 'safety' in error_text:
+            logger.warning(f"[emotion_apis] 情绪/好感度分析被上游内容安全过滤拦截，本轮跳过（{nickname}）")
+        else:
+            logger.error(f"[emotion_apis] 分析情绪/好感度失败: {e}", exc_info=True)
         return None
