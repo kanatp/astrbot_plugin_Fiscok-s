@@ -101,6 +101,9 @@ class Core(Star):
         self._group_last_activity: Dict[str, float] = {}
         self._proactive_states: Dict[str, Dict] = {}
 
+        # 连续消息合并：同一会话中短期内连发的几条消息（仅内存驻留）
+        self._merge_pending: Dict[str, Dict] = {}
+
         # 人设演化：插件侧可演化、可回滚的“自我设定”，与原生人设叠加注入
         self._persona_overlay = str(self.data_manager.get_evolved_persona().get('persona', '') or '')
         self._persona_recent: Dict[str, List[str]] = {}
@@ -383,6 +386,56 @@ class Core(Star):
         self._append_group_line(
             umo, event.get_sender_name() or '群友', message, proactive_config
         )
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def merge_fragments_on_message(self, event: AstrMessageEvent):
+        """
+        连续消息合并：对方把一句话分几条发来时，先等一小会儿，
+        若期间还有新消息则本条不单独回复，由最后一条带上全部片段一起进入 LLM
+        """
+        merge_config = self.config.get('message_merge_config', {})
+        if not merge_config.get('available', False):
+            return
+        if merge_config.get('private_only', True) and event.get_group_id():
+            return
+
+        sender_id = event.get_sender_id()
+        if not sender_id or sender_id == event.get_self_id():
+            return
+
+        message = (event.message_str or '').strip()
+        if not message or message.startswith(('/', '／')):
+            return
+
+        umo = event.unified_msg_origin
+        message_id = getattr(event.message_obj, 'message_id', None) or id(event)
+        pending = self._merge_pending.get(umo)
+        if pending is None or pending['sender_id'] != sender_id:
+            pending = {'sender_id': sender_id, 'fragments': [], 'last_id': None}
+            self._merge_pending[umo] = pending
+
+        pending['fragments'].append(message)
+        max_fragments = max(1, int(merge_config.get('max_fragments', 4) or 4))
+        if len(pending['fragments']) > max_fragments:
+            del pending['fragments'][:len(pending['fragments']) - max_fragments]
+        pending['last_id'] = message_id
+
+        delay = max(0.0, float(merge_config.get('debounce_seconds', 1.2) or 0))
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+        # 等待期间又来了更新的消息：这一条并入后面的消息，不单独回复
+        if pending['last_id'] != message_id:
+            event.stop_event()
+            return
+
+        fragments = pending['fragments'][:]
+        pending['fragments'] = []
+        if len(fragments) <= 1:
+            return
+
+        event.message_str = '\n'.join(fragments)
+        logger.info(f"[Fiscok's][merge] 已合并 {len(fragments)} 条连续消息（{umo}）")
 
     @filter.on_llm_request()
     async def on_llm_request_topic_hook(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -2027,6 +2080,7 @@ class Core(Star):
         self._topic_sessions.clear()
         self._group_recent.clear()
         self._proactive_states.clear()
+        self._merge_pending.clear()
         self._persona_recent.clear()
         await close_aux_providers()
 

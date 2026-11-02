@@ -59,6 +59,33 @@
       }
     }
   },
+  "message_merge_config": {
+    "description": "连续消息合并（把分几段说的话当成一段听）",
+    "type": "object",
+    "items": {
+      "available": {
+        "description": "是否启用连续消息合并（对方连发几条时先等一等，合并后一起理解再回复）",
+        "type": "bool",
+        "default": false
+      },
+      "private_only": {
+        "description": "是否只合并私聊消息（关闭后群聊里同一个人的连续发言也会合并）",
+        "type": "bool",
+        "default": true
+      },
+      "debounce_seconds": {
+        "description": "等待多久确认没有后续消息（秒），越大越像等对方说完",
+        "type": "float",
+        "default": 1.2,
+        "hint": "建议 0.8~2.0；设 0 则不等待，可能来不及合并"
+      },
+      "max_fragments": {
+        "description": "一次最多合并几条消息（超出只保留最近的几条）",
+        "type": "int",
+        "default": 4
+      }
+    }
+  },
   "face_config": {
     "description": "给收到的消息贴 QQ 表情回应（概率触发）",
     "type": "object",
