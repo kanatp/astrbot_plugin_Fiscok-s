@@ -298,6 +298,71 @@
       }
     }
   },
+  "personal_memory_config": {
+    "description": "个人长期记忆（仅私聊，按用户维护原子事实）配置",
+    "type": "object",
+    "items": {
+      "available": {
+        "description": "是否启用个人长期记忆（只对私聊生效，自动积累并按相关度少量注入）",
+        "type": "bool",
+        "default": false
+      },
+      "llm_provider_id": {
+        "description": "记忆抽取所用的辅助 LLM（留空则使用第一个可用模型）",
+        "type": "string",
+        "default": "",
+        "hint": "建议用轻量模型；留空回退到第一个 Provider"
+      },
+      "embedding_provider_id": {
+        "description": "记忆与检索所用的 Embedding Provider ID（留空则使用第一个可用 Embedding Provider）",
+        "type": "string",
+        "default": "",
+        "hint": "与话题记忆共用同一个向量空间更省配置"
+      },
+      "extract_every_messages": {
+        "description": "每收到多少条私聊消息触发一次记忆抽取",
+        "type": "int",
+        "default": 6,
+        "hint": "越大调用越少、记忆越滞后；建议 4~10"
+      },
+      "max_ops_per_extract": {
+        "description": "每次抽取最多执行的记忆操作条数",
+        "type": "int",
+        "default": 3
+      },
+      "max_items_per_user": {
+        "description": "每个用户最多保留的记忆条数（超出时淘汰重要度低、较旧的条目）",
+        "type": "int",
+        "default": 200,
+        "hint": "只服务单人时可以放心调大（如 500）；注入量由检索条数与字符上限控制，与总量无关"
+      },
+      "retrieve_top_k": {
+        "description": "每次私聊请求最多注入的记忆条数",
+        "type": "int",
+        "default": 4
+      },
+      "min_similarity": {
+        "description": "检索记忆的最低相似度（低于该值不注入）",
+        "type": "float",
+        "default": 0.45
+      },
+      "dedupe_similarity": {
+        "description": "新增记忆与已有记忆的合并阈值（相似度达到该值视为同一条，改为更新）",
+        "type": "float",
+        "default": 0.88
+      },
+      "max_item_chars": {
+        "description": "单条记忆注入的最大字符数（超出截断，0 表示不限制）",
+        "type": "int",
+        "default": 60
+      },
+      "max_injection_chars": {
+        "description": "记忆注入的总字符上限（超出后丢弃后续条目，0 表示不限制）",
+        "type": "int",
+        "default": 220
+      }
+    }
+  },
   "topic_tracking_config": {
     "description": "群聊话题跟踪（机器人发言后接续话题）配置",
     "type": "object",

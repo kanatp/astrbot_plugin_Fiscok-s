@@ -19,12 +19,19 @@ from .core.api.topic_memory_apis import (
 from .core.api.topic_tracking_apis import decide_topic_continuation
 from .core.api.proactive_chat_apis import generate_proactive_message
 from .core.api.persona_evolution_apis import evolve_persona
+from .core.api.personal_memory_apis import (
+    extract_personal_memories,
+    find_similar_memory,
+    retrieve_memories,
+)
 from astrbot.core.message.message_event_result import MessageChain
 from .core.prompts import (
     format_meme_placeholder_injection,
     format_emotion_state_injection,
     format_persona_overlay_injection,
     format_topic_memory_injection,
+    format_personal_memory_injection,
+    PERSONAL_MEMORY_CATEGORY_LABELS,
     TOPIC_TRACKING_REPLY_INJECTION,
 )
 from .core.net.twitter_fetch import fetch_twitter_data, check_availability
@@ -92,6 +99,10 @@ class Core(Star):
         self._emotion_lock = asyncio.Lock()
         self._emotion_pending: set = set()
         self._topic_pending: set = set()
+
+        # 个人长期记忆（仅私聊）：抽取任务防重与按用户的消息计数
+        self._personal_memory_pending: set = set()
+        self._personal_memory_counters: Dict[str, int] = {}
 
         # 群聊话题跟踪会话（umo -> 会话状态），仅内存驻留
         self._topic_sessions: Dict[str, Dict] = {}
@@ -238,6 +249,41 @@ class Core(Star):
         if not sender_id or sender_id == event.get_self_id():
             return
         self._schedule_topic_learning(sender_id, event.get_sender_name(), message, topic_config)
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def personal_memory_learn_on_message(self, event: AstrMessageEvent):
+        """
+        个人长期记忆：仅私聊触发，按条数节流，后台异步抽取“原子事实”写入该用户记忆
+        """
+        memory_config = self.config.get('personal_memory_config', {})
+        if not memory_config.get('available', False):
+            return
+
+        # 仅私聊
+        if event.get_group_id():
+            return
+
+        sender_id = event.get_sender_id()
+        if not sender_id or sender_id == event.get_self_id():
+            return
+
+        message = (event.message_str or '').strip()
+        if not message or message.startswith(('/', '／')):
+            return
+
+        every = max(1, int(memory_config.get('extract_every_messages', 6) or 6))
+        count = self._personal_memory_counters.get(sender_id, 0) + 1
+        if count < every:
+            self._personal_memory_counters[sender_id] = count
+            return
+        self._personal_memory_counters[sender_id] = 0
+
+        self._learn_personal_memory(
+            sender_id,
+            event.get_sender_name() or '对方',
+            message,
+            memory_config,
+        )
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def topic_tracking_on_message(self, event: AstrMessageEvent):
@@ -607,6 +653,71 @@ class Core(Star):
         except Exception as e:
             logger.warning(f"[Fiscok's][persona] 注入自我设定失败，不影响主请求: {e}")
 
+    @filter.on_llm_request()
+    async def on_llm_request_personal_memory_hook(self, event: AstrMessageEvent, req: ProviderRequest):
+        """
+        个人长期记忆：仅私聊，按当前消息检索少量相关记忆，压缩后注入 system_prompt
+        """
+        memory_config = self.config.get('personal_memory_config', {})
+        if not memory_config.get('available', False):
+            return
+
+        # 仅私聊
+        if event.get_group_id():
+            return
+
+        sender_id = event.get_sender_id()
+        query = (event.message_str or '').strip()
+        if not sender_id or not query:
+            return
+
+        try:
+            embedding_provider_id = memory_config.get('embedding_provider_id', '')
+            if resolve_embedding_provider(self.context, embedding_provider_id) is None:
+                return
+
+            query_vector = await get_text_embedding(self.context, embedding_provider_id, query)
+            if not query_vector:
+                return
+
+            memories = self.data_manager.get_personal_memories(sender_id)
+            if not memories:
+                return
+
+            matched = retrieve_memories(
+                memories,
+                query_vector,
+                top_k=int(memory_config.get('retrieve_top_k', 4) or 4),
+                min_similarity=float(memory_config.get('min_similarity', 0.45) or 0.45),
+            )
+            if not matched:
+                return
+
+            # 压缩注入体积：单条截断 + 总量上限
+            max_item_chars = int(memory_config.get('max_item_chars', 60) or 0)
+            max_injection_chars = int(memory_config.get('max_injection_chars', 220) or 0)
+            items = []
+            total_chars = 0
+            for memory in matched:
+                text = str(memory.get('text', '')).strip()
+                if not text:
+                    continue
+                if max_item_chars > 0 and len(text) > max_item_chars:
+                    text = text[:max_item_chars] + '…'
+                if max_injection_chars > 0 and total_chars + len(text) > max_injection_chars:
+                    break
+                items.append({'category': memory.get('category', ''), 'text': text})
+                total_chars += len(text)
+
+            injection = format_personal_memory_injection(
+                event.get_sender_name() or '对方', items
+            )
+            if injection:
+                req.system_prompt = f"{req.system_prompt or ''}\n{injection}"
+                logger.info(f"[Fiscok's][memory] 已注入 {len(items)} 条个人记忆")
+        except Exception as e:
+            logger.warning(f"[Fiscok's][memory] 检索/注入个人记忆失败，不影响主请求: {e}")
+
     @filter.on_llm_response()
     async def on_llm_response_persona_hook(self, event: AstrMessageEvent, resp):
         """
@@ -761,6 +872,76 @@ class Core(Star):
                 logger.warning(f"[Fiscok's][topic] 后台话题记忆判定失败，不影响主请求: {e}")
             finally:
                 self._topic_pending.discard(sender_id)
+
+        self._spawn_background(_run())
+
+    def _learn_personal_memory(self, sender_id: str, nickname: str, message: str, memory_config: Dict):
+        """
+        后台抽取个人长期记忆：新增/更新/删除原子事实，并把写入规模控制在配置上限内
+        """
+        if sender_id in self._personal_memory_pending:
+            return
+        self._personal_memory_pending.add(sender_id)
+
+        async def _run():
+            try:
+                existing = self.data_manager.get_personal_memories(sender_id)
+                operations = await extract_personal_memories(
+                    self.context,
+                    provider_id=memory_config.get('llm_provider_id', ''),
+                    nickname=nickname,
+                    message=message,
+                    existing=existing,
+                    max_ops=memory_config.get('max_ops_per_extract', 3),
+                )
+
+                for operation in operations:
+                    action = operation.get('action')
+                    if action == 'delete':
+                        if operation.get('id'):
+                            self.data_manager.delete_personal_memory(sender_id, operation['id'])
+                        continue
+
+                    text = operation.get('text', '')
+                    vector = await get_text_embedding(
+                        self.context,
+                        memory_config.get('embedding_provider_id', ''),
+                        text,
+                    )
+                    if not vector:
+                        logger.warning("[Fiscok's][memory] 记忆向量计算失败，跳过该条")
+                        continue
+
+                    if action == 'update':
+                        memory_id = operation.get('id', '')
+                        if not memory_id or not self.data_manager.update_personal_memory(
+                            sender_id, memory_id,
+                            text=text, vector=vector, importance=operation.get('importance'),
+                        ):
+                            logger.warning("[Fiscok's][memory] 更新记忆失败或未找到目标条目，已跳过")
+                        continue
+
+                    # add：与已有记忆高度相似时视为同一事实，改为更新，避免重复膨胀
+                    current = self.data_manager.get_personal_memories(sender_id)
+                    threshold = float(memory_config.get('dedupe_similarity', 0.88) or 0.88)
+                    similar = find_similar_memory(current, vector, threshold=threshold)
+                    if similar:
+                        self.data_manager.update_personal_memory(
+                            sender_id, similar['id'],
+                            text=text, vector=vector, importance=operation.get('importance'),
+                        )
+                    else:
+                        self.data_manager.add_personal_memory(
+                            sender_id,
+                            operation.get('category', 'profile'),
+                            text,
+                            vector,
+                            operation.get('importance', 3),
+                        )
+            except Exception as e:
+                logger.warning(f"[Fiscok's][memory] 后台个人记忆抽取失败，不影响主请求: {e}")
+            finally:
+                self._personal_memory_pending.discard(sender_id)
 
         self._spawn_background(_run())
 
@@ -1812,6 +1993,35 @@ class Core(Star):
         self.data_manager.clear_topics()
         yield event.plain_result("已清空话题记忆库")
 
+    # --- 个人长期记忆管理指令组 ---
+    @filter.command_group('personal_memory_manager', alias={'个人记忆'})
+    def personal_memory_manager(self):
+        pass
+
+    @personal_memory_manager.command('list', alias={'查看'})
+    async def personal_memory_list(self, event: AstrMessageEvent, limit: int = 20):
+        memories = self.data_manager.get_personal_memories(event.get_sender_id())
+        if not memories:
+            yield event.plain_result("还没有记录你的个人记忆（仅私聊会自动积累）")
+            return
+        recent = memories[-max(1, limit):]
+        lines = [f"你的个人记忆共 {len(memories)} 条，最近 {len(recent)} 条："]
+        for memory in recent:
+            label = PERSONAL_MEMORY_CATEGORY_LABELS.get(memory.get('category', ''), '记录')
+            lines.append(f"- [{label}] {memory.get('text', '')}")
+        yield event.plain_result("\n".join(lines))
+
+    @personal_memory_manager.command('count', alias={'数量'})
+    async def personal_memory_count(self, event: AstrMessageEvent):
+        memories = self.data_manager.get_personal_memories(event.get_sender_id())
+        max_items = self.config.get('personal_memory_config', {}).get('max_items_per_user', 200)
+        yield event.plain_result(f"当前你的个人记忆 {len(memories)} 条，上限 {max_items} 条")
+
+    @personal_memory_manager.command('clear', alias={'清空'})
+    async def personal_memory_clear(self, event: AstrMessageEvent):
+        self.data_manager.clear_personal_memories(event.get_sender_id())
+        yield event.plain_result("已清空你的个人记忆")
+
     # --- 人设演化管理指令组 ---
     @filter.command_group('persona_manager', alias={'人设管理'})
     def persona_manager(self):
@@ -2081,6 +2291,7 @@ class Core(Star):
         self._group_recent.clear()
         self._proactive_states.clear()
         self._merge_pending.clear()
+        self._personal_memory_counters.clear()
         self._persona_recent.clear()
         await close_aux_providers()
 

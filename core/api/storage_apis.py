@@ -21,6 +21,7 @@ class DataManager:
         self.instagram_cache_root = self.root / 'instagram_cache'
         self.affinity_root = self.root / 'affinity'
         self.topic_memory_root = self.root / 'topic_memory'
+        self.personal_memory_root = self.root / 'personal_memory'
         self.persona_root = self.root / 'persona'
 
         self.config = config
@@ -42,6 +43,7 @@ class DataManager:
             self.instagram_cache_root.mkdir(parents=True, exist_ok=True)
             self.affinity_root.mkdir(parents=True, exist_ok=True)
             self.topic_memory_root.mkdir(parents=True, exist_ok=True)
+            self.personal_memory_root.mkdir(parents=True, exist_ok=True)
             self.persona_root.mkdir(parents=True, exist_ok=True)
 
             logger.info('[DataManager] 已完成数据目录构建]')
@@ -52,6 +54,7 @@ class DataManager:
             self.instagram_cache_root.mkdir(parents=True, exist_ok=True)
             self.affinity_root.mkdir(parents=True, exist_ok=True)
             self.topic_memory_root.mkdir(parents=True, exist_ok=True)
+            self.personal_memory_root.mkdir(parents=True, exist_ok=True)
             self.persona_root.mkdir(parents=True, exist_ok=True)
 
     # --- bilibili视频统计基础组件 ---
@@ -1137,6 +1140,131 @@ class DataManager:
         """清空话题记忆库"""
         self._save_topic_db([])
         logger.info("[DataManager][clear_topics]已清空话题记忆库")
+
+    # --- 个人长期记忆（私聊，按用户分文件）存储 ---
+    def _get_personal_memory_file(self, user_id: str) -> Path:
+        """获取某个用户的个人记忆文件路径"""
+        safe_id = re.sub(r'[^0-9A-Za-z_-]', '_', str(user_id or 'unknown'))
+        return self.personal_memory_root / f'{safe_id}.json'
+
+    def get_personal_memories(self, user_id: str) -> List[Dict]:
+        """读取某个用户的全部个人记忆条目（含词向量）"""
+        file = self._get_personal_memory_file(user_id)
+        if not file.exists():
+            return []
+        try:
+            with open(file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except json.JSONDecodeError:
+            logger.error(f"[DataManager][get_personal_memories]解析个人记忆失败，文件可能损坏: {file}")
+            return []
+
+    def _save_personal_memories(self, user_id: str, memories: List[Dict]):
+        """
+        写回某个用户的个人记忆，并在超过上限时淘汰价值最低的条目
+
+        淘汰顺序：重要度低、更新时间旧的先删，保证记忆规模可控
+        """
+        max_items = int(self.config.get('personal_memory_config', {}).get('max_items_per_user', 200) or 0)
+        if max_items > 0 and len(memories) > max_items:
+            memories.sort(key=lambda x: (int(x.get('importance', 3) or 3), x.get('updated_at', '')))
+            memories = memories[-max_items:]
+
+        file = self._get_personal_memory_file(user_id)
+        file.parent.mkdir(parents=True, exist_ok=True)
+        with open(file, 'w', encoding='utf-8') as f:
+            json.dump(memories, f, ensure_ascii=False, separators=(',', ':'))
+
+    def _generate_personal_memory_id(self) -> str:
+        """生成唯一的个人记忆 ID"""
+        now = datetime.now().strftime('%Y%m%d_%H%M%S')
+        return f"mem_{now}_{random.randint(100, 999)}"
+
+    def add_personal_memory(
+        self,
+        user_id: str,
+        category: str,
+        text: str,
+        vector: List[float],
+        importance: int = 3,
+    ) -> Optional[str]:
+        """
+        为某个用户新增一条个人记忆
+
+        :return: 成功返回 memory_id，失败返回 None
+        """
+        try:
+            if not text or not vector:
+                logger.warning("[DataManager][add_personal_memory]记忆内容或向量为空，跳过写入")
+                return None
+
+            now = datetime.now().isoformat()
+            memory_id = self._generate_personal_memory_id()
+            memories = self.get_personal_memories(user_id)
+            memories.append({
+                "id": memory_id,
+                "category": category or "profile",
+                "text": text,
+                "vector": vector,
+                "importance": max(1, min(5, int(importance or 3))),
+                "created_at": now,
+                "updated_at": now,
+            })
+            self._save_personal_memories(user_id, memories)
+            logger.info(f"[DataManager][add_personal_memory]已记录个人记忆: user={user_id}, text={text[:30]}")
+            return memory_id
+        except Exception as e:
+            logger.error(f"[DataManager][add_personal_memory]新增个人记忆失败: {e}", exc_info=True)
+            return None
+
+    def update_personal_memory(
+        self,
+        user_id: str,
+        memory_id: str,
+        text: Optional[str] = None,
+        vector: Optional[List[float]] = None,
+        importance: Optional[int] = None,
+    ) -> bool:
+        """更新一条个人记忆的内容/向量/重要度"""
+        try:
+            memories = self.get_personal_memories(user_id)
+            for memory in memories:
+                if memory.get('id') != memory_id:
+                    continue
+                if text:
+                    memory['text'] = text
+                if vector:
+                    memory['vector'] = vector
+                if importance is not None:
+                    memory['importance'] = max(1, min(5, int(importance)))
+                memory['updated_at'] = datetime.now().isoformat()
+                self._save_personal_memories(user_id, memories)
+                return True
+            logger.warning(f"[DataManager][update_personal_memory]未找到记忆: user={user_id}, id={memory_id}")
+            return False
+        except Exception as e:
+            logger.error(f"[DataManager][update_personal_memory]更新个人记忆失败: {e}", exc_info=True)
+            return False
+
+    def delete_personal_memory(self, user_id: str, memory_id: str) -> bool:
+        """删除一条个人记忆"""
+        try:
+            memories = self.get_personal_memories(user_id)
+            kept = [m for m in memories if m.get('id') != memory_id]
+            if len(kept) == len(memories):
+                return False
+            self._save_personal_memories(user_id, kept)
+            logger.info(f"[DataManager][delete_personal_memory]已删除个人记忆: user={user_id}, id={memory_id}")
+            return True
+        except Exception as e:
+            logger.error(f"[DataManager][delete_personal_memory]删除个人记忆失败: {e}", exc_info=True)
+            return False
+
+    def clear_personal_memories(self, user_id: str):
+        """清空某个用户的个人记忆"""
+        self._save_personal_memories(user_id, [])
+        logger.info(f"[DataManager][clear_personal_memories]已清空个人记忆: user={user_id}")
 
     # --- 人设演化（自我设定）存储 ---
     def _get_persona_file(self) -> Path:

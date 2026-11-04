@@ -377,3 +377,78 @@ def format_private_proactive_chat_prompt(time_desc: str, nickname: str, recent: 
         recent=recent or "（无）",
         last=last or "（无）",
     )
+
+
+# ==================== 个人长期记忆（私聊）相关提示词 ====================
+
+# 记忆类别 -> 中文标签（注入与展示时使用）
+PERSONAL_MEMORY_CATEGORY_LABELS = {
+    "profile": "档案",
+    "preference": "偏好",
+    "event": "经历",
+    "plan": "计划",
+    "relation": "关系",
+}
+
+# 记忆抽取系统提示词
+PERSONAL_MEMORY_EXTRACTION_SYSTEM_PROMPT = (
+    "你负责为聊天机器人维护一位私聊用户的长期个人记忆。"
+    "只提取稳定、可复用的事实，并以新增/更新/删除操作的形式返回。只返回 JSON，不要返回其他内容。"
+)
+
+# 记忆抽取提示词（使用时需要格式化 nickname、existing、message、max_ops）
+PERSONAL_MEMORY_EXTRACTION_PROMPT = """你在私聊中长期记住「{nickname}」。请根据这条新消息，决定是否要新增、更新或删除记忆。
+
+已有记忆：
+{existing}
+
+新消息：
+{nickname}：{message}
+
+规则：
+- 只记稳定、长期有用的事实：身份/称呼、喜好与厌恶、重要经历、长期计划、和机器人的关系梗；一次性寒暄、临时情绪、猜测出来的内容不要记
+- 每条只写一个原子事实，20 字以内，第三人称陈述（如“喜欢喝冰美式”“在准备考研”）
+- 与已有记忆重复、只是补充细节 → update，并填对应 id 覆盖原条目
+- 明显过时或被否认 → delete，并填对应 id
+- 普通闲聊、没有新信息 → 返回空数组
+- 一次最多 {max_ops} 条操作
+
+返回 JSON：
+{{"memories":[{{"action":"add|update|delete","category":"profile|preference|event|plan|relation","text":"原子事实","importance":1-5,"id":"update/delete 时填已有记忆 id"}}]}}
+只返回 JSON，不要返回其他内容。"""
+
+# 记忆注入提示词（放入 system_prompt；仅注入检索命中的少量条目）
+PERSONAL_MEMORY_INJECTION_HEAD = "\n<关于{nickname}的长期记忆>\n（背景参考，自然使用即可，不要逐条复述，也不要提“记忆库”）"
+
+
+def format_personal_memory_extraction_prompt(
+    nickname: str,
+    existing: str,
+    message: str,
+    max_ops: int = 3,
+) -> str:
+    """格式化个人记忆抽取提示词"""
+    return PERSONAL_MEMORY_EXTRACTION_PROMPT.format(
+        nickname=nickname or "对方",
+        existing=existing or "（无）",
+        message=message or "（无）",
+        max_ops=max(1, int(max_ops)),
+    )
+
+
+def format_personal_memory_injection(nickname: str, memories) -> str:
+    """
+    将检索到的个人记忆拼装为注入文本（每行一条，压缩体积）
+
+    :param memories: 每项含 category、text
+    """
+    items = []
+    for memory in memories:
+        text = str(memory.get('text', '')).strip()
+        if not text:
+            continue
+        label = PERSONAL_MEMORY_CATEGORY_LABELS.get(str(memory.get('category', '')), '记录')
+        items.append(f"- {label}：{text}")
+    if not items:
+        return ""
+    return PERSONAL_MEMORY_INJECTION_HEAD.format(nickname=nickname or "对方") + "\n" + "\n".join(items) + "\n</关于长期记忆>"
