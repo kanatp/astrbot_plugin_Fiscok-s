@@ -273,7 +273,11 @@ class Core(Star):
 
         every = max(1, int(memory_config.get('extract_every_messages', 6) or 6))
         count = self._personal_memory_counters.get(sender_id, 0) + 1
-        if count < every:
+
+        # 用户在纠正/否认记忆：不等抽取周期，立即处理
+        correction_cues = ('记错', '记岔', '更正', '别记', '忘掉', '说错', '删掉', '不是这样', '不是这个')
+        is_correction = any(cue in message for cue in correction_cues)
+        if not is_correction and count < every:
             self._personal_memory_counters[sender_id] = count
             return
         self._personal_memory_counters[sender_id] = 0
@@ -2008,8 +2012,22 @@ class Core(Star):
         lines = [f"你的个人记忆共 {len(memories)} 条，最近 {len(recent)} 条："]
         for memory in recent:
             label = PERSONAL_MEMORY_CATEGORY_LABELS.get(memory.get('category', ''), '记录')
-            lines.append(f"- [{label}] {memory.get('text', '')}")
+            lines.append(f"- [{label}] {memory.get('text', '')}（id={memory.get('id', '')}）")
+        lines.append("如需删除某条，发送：个人记忆 删除 <id>")
         yield event.plain_result("\n".join(lines))
+
+    @personal_memory_manager.command('delete', alias={'删除'})
+    async def personal_memory_delete(self, event: AstrMessageEvent, memory_id: str):
+        memories = self.data_manager.get_personal_memories(event.get_sender_id())
+        matches = [m for m in memories if m.get('id') == memory_id or str(m.get('id', '')).startswith(memory_id)]
+        if not matches:
+            yield event.plain_result(f"没有找到 id 为 {memory_id} 的记忆")
+            return
+        if len(matches) > 1:
+            yield event.plain_result("匹配到多条记忆，请提供更完整的 id")
+            return
+        self.data_manager.delete_personal_memory(event.get_sender_id(), matches[0]['id'])
+        yield event.plain_result(f"已删除记忆：{matches[0].get('text', '')}")
 
     @personal_memory_manager.command('count', alias={'数量'})
     async def personal_memory_count(self, event: AstrMessageEvent):
