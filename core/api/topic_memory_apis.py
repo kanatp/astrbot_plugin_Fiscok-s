@@ -62,52 +62,96 @@ async def get_text_embedding(
         return None
 
 
-async def decide_topic_memory(
+async def extract_topic_memories(
     context: Context,
     llm_provider_id: str,
     nickname: str,
-    dialogue: str,
-) -> Optional[Dict]:
+    message: str,
+    existing: List[Dict],
+    max_ops: int = 3,
+    timeout: float = 20.0,
+) -> List[Dict]:
     """
-    调用辅助 LLM 判定当前对话是否值得保存为话题记忆。
+    调用辅助 LLM，把这条消息转成针对某个会话记忆库的新增/更新/删除操作。
 
-    :return: 需要保存时返回 {"keyword": str, "content": str}，否则返回 None
+    :param existing: 该会话已有的记忆条目（含 id/text）
+    :return: 操作列表，每项 {"action": add|update|delete, "text": str, "importance": int, "id": str}
     """
-    if not dialogue or not dialogue.strip():
-        return None
+    if not message or not message.strip():
+        return []
+    try:
+        max_ops = max(1, int(max_ops or 3))
+    except (TypeError, ValueError):
+        max_ops = 3
 
     try:
         provider = await get_aux_provider(context, llm_provider_id)
         if provider is None:
-            logger.warning("[Fiscok's][topic] 未找到可用的 LLM Provider，跳过话题判定")
-            return None
+            logger.warning("[Fiscok's][topic] 未找到可用的 LLM Provider，跳过话题记忆抽取")
+            return []
 
-        response = await provider.text_chat(
-            prompt=format_topic_memory_analysis_prompt(nickname, dialogue),
-            system_prompt=TOPIC_MEMORY_ANALYSIS_SYSTEM_PROMPT,
-            temperature=TOPIC_DECISION_TEMPERATURE,
+        lines = []
+        for item in existing[-30:]:
+            text = str(item.get('text', '')).strip()
+            if not text:
+                continue
+            lines.append(f"- id={item.get('id', '')}：{text[:60]}")
+
+        response = await asyncio.wait_for(
+            provider.text_chat(
+                prompt=format_topic_memory_analysis_prompt(
+                    nickname, message, "\n".join(lines), max_ops
+                ),
+                system_prompt=TOPIC_MEMORY_ANALYSIS_SYSTEM_PROMPT,
+                temperature=TOPIC_DECISION_TEMPERATURE,
+            ),
+            timeout=timeout,
         )
         if not response or not response.completion_text:
-            return None
+            return []
 
         result = _extract_json(response.completion_text)
         if not result:
-            return None
+            return []
 
-        if not result.get("save"):
-            return None
+        raw_ops = result.get('topics')
+        if not isinstance(raw_ops, list):
+            return []
 
-        keyword = str(result.get("keyword", "")).strip()
-        content = str(result.get("content", "")).strip()
-        if not content:
-            logger.warning(f"[Fiscok's][topic] 模型判定保存但内容为空: {result}")
-            return None
-
-        logger.info(f"[Fiscok's][topic] 模型判定需保存话题: keyword={keyword}")
-        return {"keyword": keyword, "content": content}
+        operations = []
+        for raw in raw_ops:
+            if not isinstance(raw, dict):
+                continue
+            action = str(raw.get('action', '')).strip().lower()
+            if action not in ('add', 'update', 'delete'):
+                continue
+            text = str(raw.get('text', '')).strip()
+            op_id = str(raw.get('id', '')).strip()
+            if action in ('add', 'update') and not text:
+                continue
+            if action == 'update' and not op_id:
+                action = 'add'
+            if action == 'delete' and not op_id:
+                continue
+            try:
+                importance = int(raw.get('importance', 3) or 3)
+            except (TypeError, ValueError):
+                importance = 3
+            operations.append({
+                'action': action,
+                'text': text,
+                'importance': max(1, min(5, importance)),
+                'id': op_id,
+            })
+        if operations:
+            logger.info(f"[Fiscok's][topic] 记忆操作: {[(op['action'], op['text'][:20]) for op in operations]}")
+        return operations[:max(1, max_ops)]
+    except asyncio.TimeoutError:
+        logger.warning("[Fiscok's][topic] 话题记忆抽取超时，跳过")
+        return []
     except Exception as e:
-        logger.warning(f"[Fiscok's][topic] 话题判定失败，不影响主流程: {e}")
-        return None
+        logger.warning(f"[Fiscok's][topic] 话题记忆抽取失败，不影响主流程: {e}")
+        return []
 
 
 def _cosine(a: List[float], b: List[float]) -> Optional[float]:
@@ -152,9 +196,11 @@ def retrieve_topics(
             dim_mismatch += 1
             continue
         if sim >= min_similarity:
+            text = str(topic.get("text", "")).strip()
+            if not text:
+                continue
             scored.append({
-                "keyword": topic.get("keyword", ""),
-                "content": topic.get("content", ""),
+                "text": text,
                 "similarity": sim,
             })
 

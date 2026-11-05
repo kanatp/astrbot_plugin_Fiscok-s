@@ -201,52 +201,59 @@ def format_persona_overlay_injection(persona: str) -> str:
 # ==================== 话题记忆相关提示词 ====================
 
 # 话题记忆判定的系统提示词
-TOPIC_MEMORY_ANALYSIS_SYSTEM_PROMPT = ("你是一个聊天机器人的长期话题记忆维护器，"
-                                       "负责判断当前对话中是否出现了值得长期记住的话题，"
-                                       "并在需要时抽取唤起词与该话题的原始对话内容。"
+TOPIC_MEMORY_ANALYSIS_SYSTEM_PROMPT = ("你负责为聊天机器人维护某个会话（群聊或私聊）的长期记忆。"
+                                       "只提取稳定、日后有用的事实，并以新增/更新/删除操作的形式返回。"
                                        "只返回 JSON，不要返回其他内容。")
 
-# 话题记忆判定提示词（使用时需要格式化 nickname、dialogue）
-TOPIC_MEMORY_ANALYSIS_PROMPT = """你是聊天机器人的长期话题记忆维护器，正在与用户对话。
-请判断当前这段对话中，是否出现了值得长期记住的话题（例如用户的偏好、约定、重要事实、持续关注的事件等）。
+# 话题记忆判定提示词（使用时需要格式化 nickname、existing、message、max_ops）
+TOPIC_MEMORY_ANALYSIS_PROMPT = """你在维护一个聊天场景的长期话题记忆。请根据这条新消息，决定是否要新增、更新或删除记忆。
 
-返回以下JSON格式：
-{{
-  "save": true 或 false（是否需要保存这个话题）,
-  "keyword": "唤起词（简短、便于日后唤起该话题，10字以内）",
-  "content": "话题记忆（忠实还原该话题的原始对话片段或要点）"
-}}
-判断依据：
-- 值得长期记住：用户的稳定偏好、约定、重要事实、持续关注的人/事/物 → save=true
-- 一次性寒暄、临时性闲聊、无明确话题、已在记忆中充分覆盖的内容 → save=false
-- save=false 时 keyword 与 content 返回空字符串
-只返回JSON，不要返回其他内容。
+已有记忆：
+{existing}
 
-当前用户昵称：{nickname}
-当前这段对话：
-{dialogue}"""
+新消息：
+{nickname}：{message}
+
+规则：
+- 值得记：约定与计划、持续关注的人或事、重要事实、群体梗与称呼、明确偏好与雷点；一次性闲聊、临时情绪、猜测不记
+- 每条只写一个原子事实，30 字以内，第三人称陈述（如“群里约好周末一起打副本”）
+- 与已有记忆重复、只是补充细节 → update，并填对应 id 覆盖原条目
+- 被明确指出记错、被否认、或事情已结束 → update 为最新状态或 delete 对应 id，不要保留过时内容
+- 普通闲聊、没有新信息 → 返回空数组
+- 一次最多 {max_ops} 条操作
+
+返回 JSON：
+{{"topics":[{{"action":"add|update|delete","text":"原子事实","importance":1-5,"id":"update/delete 时填已有记忆 id"}}]}}
+只返回 JSON，不要返回其他内容。"""
 
 # 话题记忆注入提示词（添加到主 LLM 的 system_prompt 中，由 format_topic_memory_injection 拼装）
 TOPIC_MEMORY_INJECTION_HEAD = """
 <相关话题记忆>
-以下是你过去记住的相关话题，仅作为背景参考（无需向用户复述来源或提及"记忆"）：
+以下是你记得的相关信息，仅作为背景参考（无需向用户复述来源或提及"记忆"）：
 """
 
 TOPIC_MEMORY_INJECTION_TAIL = "</相关话题记忆>"
 
 
-def format_topic_memory_analysis_prompt(nickname: str, dialogue: str) -> str:
+def format_topic_memory_analysis_prompt(nickname: str, dialogue: str, existing: str = '', max_ops: int = 3) -> str:
     """
     格式化话题记忆判定提示词
 
     Args:
         nickname: 用户昵称
-        dialogue: 当前这段对话（原始对话文本）
+        dialogue: 当前这条消息
+        existing: 该会话已有记忆的清单（带 id）
+        max_ops: 单次最多操作条数
 
     Returns:
         格式化后的提示词
     """
-    return TOPIC_MEMORY_ANALYSIS_PROMPT.format(nickname=nickname, dialogue=dialogue)
+    return TOPIC_MEMORY_ANALYSIS_PROMPT.format(
+        nickname=nickname,
+        message=dialogue,
+        existing=existing or "（无）",
+        max_ops=max_ops,
+    )
 
 
 def format_topic_memory_injection(topics) -> str:
@@ -254,18 +261,17 @@ def format_topic_memory_injection(topics) -> str:
     将检索到的话题记忆拼装为注入文本
 
     Args:
-        topics: 话题列表，每项为 {"keyword": str, "content": str}
+        topics: 话题列表，每项为 {"text": str}
 
     Returns:
         注入文本（无有效话题时返回空字符串）
     """
     items = []
     for topic in topics:
-        keyword = str(topic.get("keyword", "")).strip()
-        content = str(topic.get("content", "")).strip()
-        if not content:
+        text = str(topic.get("text", "")).strip()
+        if not text:
             continue
-        items.append(f"- 唤起词：{keyword}\n  话题内容：{content}")
+        items.append(f"- {text}")
     if not items:
         return ""
     return TOPIC_MEMORY_INJECTION_HEAD + "\n".join(items) + "\n" + TOPIC_MEMORY_INJECTION_TAIL

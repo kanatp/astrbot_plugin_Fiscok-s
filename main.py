@@ -12,7 +12,7 @@ from .core.api.emotion_apis import analyze_emotion_state
 from .core.api.provider_utils import close_aux_providers
 from .core.api.topic_memory_apis import (
     get_text_embedding,
-    decide_topic_memory,
+    extract_topic_memories,
     retrieve_topics,
     resolve_embedding_provider,
 )
@@ -248,7 +248,9 @@ class Core(Star):
         sender_id = event.get_sender_id()
         if not sender_id or sender_id == event.get_self_id():
             return
-        self._schedule_topic_learning(sender_id, event.get_sender_name(), message, topic_config)
+        self._schedule_topic_learning(
+            sender_id, event.get_sender_name(), message, topic_config, event.unified_msg_origin
+        )
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def personal_memory_learn_on_message(self, event: AstrMessageEvent):
@@ -510,7 +512,7 @@ class Core(Star):
             if not query_vector:
                 return
 
-            topics = self.data_manager.get_all_topics()
+            topics = self.data_manager.get_topics(event.unified_msg_origin)
             if not topics:
                 return
 
@@ -523,20 +525,28 @@ class Core(Star):
             if not matched:
                 return
 
-            # 截断单条话题内容，控制注入体积
-            max_chars = int(topic_config.get('max_content_chars', 200) or 0)
-            if max_chars > 0:
-                for topic in matched:
-                    content = str(topic.get('content', ''))
-                    if len(content) > max_chars:
-                        topic['content'] = content[:max_chars] + '…'
+            # 截断单条记忆内容 + 控制注入总量
+            max_chars = int(topic_config.get('max_content_chars', 60) or 0)
+            max_injection_chars = int(topic_config.get('max_injection_chars', 200) or 0)
+            items = []
+            total_chars = 0
+            for topic in matched:
+                text = str(topic.get('text', '')).strip()
+                if not text:
+                    continue
+                if max_chars > 0 and len(text) > max_chars:
+                    text = text[:max_chars] + '…'
+                if max_injection_chars > 0 and total_chars + len(text) > max_injection_chars:
+                    break
+                items.append({'text': text})
+                total_chars += len(text)
 
-            injection = format_topic_memory_injection(matched)
+            injection = format_topic_memory_injection(items)
             if injection:
                 req.system_prompt = f"{req.system_prompt or ''}\n{injection}"
                 logger.info(
-                    f"[Fiscok's][topic] 已注入 {len(matched)} 条相关话题记忆: "
-                    f"{[t.get('keyword') for t in matched]}"
+                    f"[Fiscok's][topic] 已注入 {len(items)} 条相关记忆: "
+                    f"{[item['text'][:20] for item in items]}"
                 )
         except Exception as e:
             logger.warning(f"[Fiscok's][topic] 检索/注入话题记忆失败，不影响主请求: {e}")
@@ -841,41 +851,70 @@ class Core(Star):
 
         self._spawn_background(_run())
 
-    def _schedule_topic_learning(self, sender_id: str, nickname: str, message: str, topic_config: Dict):
+    def _schedule_topic_learning(self, sender_id: str, nickname: str, message: str, topic_config: Dict, scope: str = ''):
         """
-        将话题记忆判定放入后台异步执行（同一用户串行，避免重复堆积）
+        将话题记忆抽取放入后台异步执行（同一用户同一会话串行，避免重复堆积）
         """
-        if sender_id in self._topic_pending:
+        pending_key = f"{sender_id}:{scope}"
+        if pending_key in self._topic_pending:
             return
-        self._topic_pending.add(sender_id)
+        self._topic_pending.add(pending_key)
 
         async def _run():
             try:
-                # 辅助 LLM 判定是否值得保存该话题
-                result = await decide_topic_memory(
+                # 让模型结合该会话已有记忆，输出 add/update/delete 操作
+                existing = self.data_manager.get_topics(scope)
+                operations = await extract_topic_memories(
                     self.context,
                     llm_provider_id=topic_config.get('llm_provider_id', ''),
                     nickname=nickname,
-                    dialogue=message,
+                    message=message,
+                    existing=existing,
+                    max_ops=topic_config.get('max_ops_per_extract', 3),
                 )
-                if not result:
-                    return
 
-                # 计算话题内容的词向量后入库
-                vector = await get_text_embedding(
-                    self.context,
-                    topic_config.get('embedding_provider_id', ''),
-                    result.get('content', ''),
-                )
-                if not vector:
-                    logger.warning("[Fiscok's][topic] 话题向量计算失败，跳过入库")
-                    return
+                for operation in operations:
+                    action = operation.get('action')
+                    if action == 'delete':
+                        if operation.get('id'):
+                            self.data_manager.delete_topic(operation['id'])
+                        continue
 
-                self.data_manager.add_topic(result.get('keyword', ''), result.get('content', ''), vector)
+                    text = operation.get('text', '')
+                    vector = await get_text_embedding(
+                        self.context,
+                        topic_config.get('embedding_provider_id', ''),
+                        text,
+                    )
+                    if not vector:
+                        logger.warning("[Fiscok's][topic] 记忆向量计算失败，跳过该条")
+                        continue
+
+                    if action == 'update':
+                        if not operation.get('id') or not self.data_manager.update_topic(
+                            operation['id'],
+                            text=text, vector=vector, importance=operation.get('importance'),
+                        ):
+                            logger.warning("[Fiscok's][topic] 更新记忆失败或未找到目标条目，已跳过")
+                        continue
+
+                    # add：与该会话已有记忆高度相似时视为同一事实，改为更新
+                    current = self.data_manager.get_topics(scope)
+                    threshold = float(topic_config.get('dedupe_similarity', 0.88) or 0.88)
+                    similar = find_similar_memory(current, vector, threshold=threshold)
+                    if similar:
+                        self.data_manager.update_topic(
+                            similar['id'],
+                            text=text, vector=vector, importance=operation.get('importance'),
+                        )
+                    else:
+                        self.data_manager.add_topic(
+                            scope, text, vector, operation.get('importance', 3)
+                        )
             except Exception as e:
-                logger.warning(f"[Fiscok's][topic] 后台话题记忆判定失败，不影响主请求: {e}")
+                logger.warning(f"[Fiscok's][topic] 后台话题记忆抽取失败，不影响主请求: {e}")
             finally:
-                self._topic_pending.discard(sender_id)
+                self._topic_pending.discard(pending_key)
 
         self._spawn_background(_run())
 
@@ -1976,26 +2015,51 @@ class Core(Star):
 
     @topic_memory_manager.command('list', alias={'列表'})
     async def topic_memory_list(self, event: AstrMessageEvent, limit: int = 20):
-        topics = self.data_manager.get_all_topics()
+        topics = self.data_manager.get_topics(event.unified_msg_origin)
         if not topics:
-            yield event.plain_result("话题记忆库为空")
+            yield event.plain_result("当前会话的话题记忆库为空")
             return
-        recent = topics[-limit:]
-        lines = [f"话题记忆共 {len(topics)} 条，最近 {len(recent)} 条："]
+        recent = topics[-max(1, limit):]
+        lines = [f"当前会话话题记忆共 {len(topics)} 条，最近 {len(recent)} 条："]
         for topic in recent:
-            lines.append(f"- {topic.get('keyword', '')} | {topic.get('timestamp', '')}")
+            lines.append(f"- {topic.get('text', '')}（id={topic.get('id', '')}）")
+        lines.append("如需删除某条，发送：话题记忆管理 删除 <id 或关键词>")
         yield event.plain_result("\n".join(lines))
+
+    @topic_memory_manager.command('delete', alias={'删除'})
+    async def topic_memory_delete(self, event: AstrMessageEvent, keyword: str):
+        raw = (keyword or '').strip().strip('"\'“”')
+        topics = self.data_manager.get_topics(event.unified_msg_origin)
+        matches = []
+        for topic in topics:
+            text = str(topic.get('text', ''))
+            topic_id = str(topic.get('id', ''))
+            if topic_id == raw or topic_id.startswith(raw):
+                matches.append(topic)
+            elif raw and raw in text:
+                matches.append(topic)
+        if not matches:
+            yield event.plain_result(f"当前会话没有与「{raw}」匹配的话题记忆")
+            return
+        if len(matches) > 1:
+            yield event.plain_result(f"匹配到 {len(matches)} 条，请提供更精确的关键词或 id")
+            return
+        self.data_manager.delete_topic(matches[0]['id'])
+        yield event.plain_result(f"已删除话题记忆：{matches[0].get('text', '')}")
 
     @topic_memory_manager.command('count', alias={'数量'})
     async def topic_memory_count(self, event: AstrMessageEvent):
-        max_topics = self.config.get('topic_memory_config', {}).get('max_topics', 300)
-        yield event.plain_result(f"当前话题记忆 {self.data_manager.get_topic_count()} 条，上限 {max_topics} 条")
+        config = self.config.get('topic_memory_config', {})
+        yield event.plain_result(
+            f"当前会话话题记忆 {self.data_manager.get_topic_count(event.unified_msg_origin)} 条，"
+            f"全会话合计 {self.data_manager.get_topic_count()} 条（全局上限 {config.get('max_topics', 300)}）"
+        )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @topic_memory_manager.command('clear', alias={'清空'})
     async def topic_memory_clear(self, event: AstrMessageEvent):
-        self.data_manager.clear_topics()
-        yield event.plain_result("已清空话题记忆库")
+        self.data_manager.clear_topics(event.unified_msg_origin)
+        yield event.plain_result("已清空当前会话的话题记忆")
 
     # --- 个人长期记忆管理指令组 ---
     @filter.command_group('personal_memory_manager', alias={'个人记忆'})
@@ -2013,18 +2077,35 @@ class Core(Star):
         for memory in recent:
             label = PERSONAL_MEMORY_CATEGORY_LABELS.get(memory.get('category', ''), '记录')
             lines.append(f"- [{label}] {memory.get('text', '')}（id={memory.get('id', '')}）")
-        lines.append("如需删除某条，发送：个人记忆 删除 <id>")
+        lines.append("如需删除某条，发送：个人记忆 删除 <id 或关键词>")
         yield event.plain_result("\n".join(lines))
 
     @personal_memory_manager.command('delete', alias={'删除'})
     async def personal_memory_delete(self, event: AstrMessageEvent, memory_id: str):
+        raw = (memory_id or '').strip().strip('"\'“”')
+        for prefix in ('id=', 'id：', 'id:'):
+            if raw.lower().startswith(prefix):
+                raw = raw[len(prefix):].strip()
+
         memories = self.data_manager.get_personal_memories(event.get_sender_id())
-        matches = [m for m in memories if m.get('id') == memory_id or str(m.get('id', '')).startswith(memory_id)]
+        matches = []
+        for memory in memories:
+            memory_id_value = str(memory.get('id', ''))
+            text = str(memory.get('text', ''))
+            if memory_id_value == raw or memory_id_value.startswith(raw):
+                matches.append(memory)
+            elif raw.isdigit() and memory_id_value.endswith(f'_{raw}'):
+                matches.append(memory)
+            elif raw and raw in text:
+                matches.append(memory)
+
         if not matches:
-            yield event.plain_result(f"没有找到 id 为 {memory_id} 的记忆")
+            known_ids = '、'.join(str(m.get('id', '')) for m in memories[-3:]) or '（暂无记忆）'
+            logger.warning(f"[Fiscok's][memory] 删除未命中: input={raw}, 当前共 {len(memories)} 条")
+            yield event.plain_result(f"没有找到与「{raw}」匹配的记忆；最近几条的 id：{known_ids}")
             return
         if len(matches) > 1:
-            yield event.plain_result("匹配到多条记忆，请提供更完整的 id")
+            yield event.plain_result(f"匹配到 {len(matches)} 条记忆，请提供更完整的 id 或更精确的关键词")
             return
         self.data_manager.delete_personal_memory(event.get_sender_id(), matches[0]['id'])
         yield event.plain_result(f"已删除记忆：{matches[0].get('text', '')}")

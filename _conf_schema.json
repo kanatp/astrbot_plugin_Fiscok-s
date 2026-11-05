@@ -250,7 +250,7 @@
     }
   },
   "topic_memory_config": {
-    "description": "话题记忆（词向量检索）配置",
+    "description": "话题记忆（按会话维护原子事实 + 词向量检索）配置",
     "type": "object",
     "items": {
       "available": {
@@ -259,40 +259,61 @@
         "default": false
       },
       "embedding_provider_id": {
-        "description": "用于话题词向量的 Embedding Provider ID",
+        "description": "用于记忆词向量的 Embedding Provider ID",
         "type": "string",
         "default": "",
         "hint": "手动填写在 AstrBot 中已配置的 Embedding 模型 Provider 的 ID（如 ollama/bge-m3）。留空时自动使用第一个可用的 Embedding Provider；未配置 Embedding Provider 时该功能自动禁用。注意：本项不使用下拉选择器，因 AstrBot 的 select_provider 只列出对话模型"
       },
       "llm_provider_id": {
-        "description": "话题判定所用辅助 LLM Provider（低温度，后台调用）",
+        "description": "记忆抽取所用辅助 LLM Provider（低温度，后台调用）",
         "type": "string",
         "default": "",
         "_special": "select_provider",
         "hint": "留空时使用第一个可用的模型；辅助调用会自动关闭思考模式"
       },
       "max_topics": {
-        "description": "记忆上限（最大话题条数），超出按时间淘汰最旧",
+        "description": "全部会话合计的记忆上限（条），超出优先淘汰重要度低、较旧的",
         "type": "int",
-        "default": 300
+        "default": 600
+      },
+      "max_items_per_scope": {
+        "description": "单个会话（群聊/私聊）的记忆上限（条）",
+        "type": "int",
+        "default": 80,
+        "hint": "记忆按会话隔离，互不串台；单人使用可调大"
       },
       "min_similarity": {
-        "description": "记忆下限（相似度阈值），低于该值的话题不注入",
+        "description": "检索相似度下限，低于该值的记忆不注入",
         "type": "float",
         "default": 0.5
       },
       "retrieve_top_k": {
-        "description": "单次检索最多注入的话题条数",
+        "description": "单次检索最多注入的记忆条数",
         "type": "int",
         "default": 3
       },
+      "dedupe_similarity": {
+        "description": "新增记忆与已有记忆的合并阈值（高于该值视为同一事实并覆盖）",
+        "type": "float",
+        "default": 0.88
+      },
       "analyze_probability": {
-        "description": "每条消息触发后台话题判定的概率（节流辅助模型开销）",
+        "description": "每条消息触发后台记忆抽取的概率（节流辅助模型开销）",
         "type": "float",
         "default": 0.2
       },
+      "max_ops_per_extract": {
+        "description": "单次抽取最多允许的新增/更新/删除操作条数",
+        "type": "int",
+        "default": 3
+      },
       "max_content_chars": {
-        "description": "单条话题记忆注入的最大字符数（超出截断，0 表示不限制）",
+        "description": "单条记忆注入的最大字符数（超出截断，0 表示不限制）",
+        "type": "int",
+        "default": 60
+      },
+      "max_injection_chars": {
+        "description": "单次注入记忆的总字符上限（0 表示不限制）",
         "type": "int",
         "default": 200
       }

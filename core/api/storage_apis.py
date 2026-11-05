@@ -1060,29 +1060,60 @@ class DataManager:
         result.sort(key=lambda x: x.get("timestamp", ""))
         return result
 
-    # --- 话题记忆存储基础组件 ---
+    # --- 话题记忆存储（按会话隔离的原子事实） ---
     def _get_topic_db_path(self) -> Path:
         """获取话题记忆数据库文件路径"""
         return self.topic_memory_root / 'topic_db.json'
 
     def _load_topic_db(self) -> List[Dict]:
-        """读取话题记忆数据库，文件不存在或损坏则返回空列表"""
+        """读取话题记忆数据库"""
         file = self._get_topic_db_path()
         if not file.exists():
             return []
         try:
             with open(file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
         except json.JSONDecodeError:
             logger.error(f"[DataManager][_load_topic_db]解析话题记忆数据库失败，文件可能损坏: {file}")
             return []
 
+        return [item for item in (data if isinstance(data, list) else []) if isinstance(item, dict) and item.get('text')]
+
     def _save_topic_db(self, db: List[Dict]):
-        """将话题记忆数据库写回 JSON 文件（紧凑存储，避免向量数组占用大量空白）"""
+        """按会话与总量双重上限裁剪后写回（紧凑存储，避免向量数组占用大量空白）"""
+        db = self._trim_topics(db)
         file = self._get_topic_db_path()
         file.parent.mkdir(parents=True, exist_ok=True)
         with open(file, 'w', encoding='utf-8') as f:
             json.dump(db, f, ensure_ascii=False, separators=(',', ':'))
+
+    def _trim_topics(self, db: List[Dict]) -> List[Dict]:
+        """
+        记忆规模控制：先按会话裁剪（重要度低、较旧的先淘汰），再按全局总量裁剪
+        """
+        config = self.config.get('topic_memory_config', {})
+        per_scope = int(config.get('max_items_per_scope', 80) or 0)
+        if per_scope > 0:
+            grouped: Dict[str, List[Dict]] = {}
+            for item in db:
+                grouped.setdefault(str(item.get('scope', '')), []).append(item)
+            kept = []
+            for items in grouped.values():
+                items.sort(key=lambda x: (
+                    int(x.get('importance', 3) or 3),
+                    str(x.get('updated_at') or x.get('timestamp', '')),
+                ))
+                kept.extend(items[-per_scope:])
+            db = kept
+
+        max_topics = int(config.get('max_topics', 300) or 0)
+        if max_topics > 0 and len(db) > max_topics:
+            db.sort(key=lambda x: (
+                int(x.get('importance', 3) or 3),
+                str(x.get('updated_at') or x.get('timestamp', '')),
+            ))
+            db = db[-max_topics:]
+        return db
 
     def _generate_topic_id(self) -> str:
         """生成唯一的话题记忆 ID"""
@@ -1091,17 +1122,17 @@ class DataManager:
         return f"topic_{now}_{rand}"
 
     # --- 话题记忆核心接口 ---
-    def add_topic(self, keyword: str, content: str, vector: List[float]) -> Optional[str]:
+    def add_topic(self, scope: str, text: str, vector: List[float], importance: int = 3) -> Optional[str]:
         """
-        添加一条话题记忆（唤起词 + 话题内容 + 词向量）
+        添加一条话题记忆（原子事实 + 词向量）
 
-        :param keyword: 唤起词
-        :param content: 话题记忆（原始对话内容）
-        :param vector: 话题内容的词向量
+        :param scope: 归属会话（unified_msg_origin）
+        :param text: 原子事实
+        :param vector: 事实文本的词向量
         :return: 成功返回 topic_id，失败返回 None
         """
         try:
-            if not content or not vector:
+            if not text or not vector:
                 logger.warning("[DataManager][add_topic]话题内容或向量为空，跳过写入")
                 return None
 
@@ -1109,37 +1140,82 @@ class DataManager:
             db = self._load_topic_db()
             db.append({
                 "id": topic_id,
-                "keyword": keyword,
-                "content": content,
+                "scope": scope or '',
+                "text": text,
                 "vector": vector,
+                "importance": max(1, min(5, int(importance or 3))),
                 "timestamp": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
             })
-
-            # 记忆上限：超出后按时间戳淘汰最旧的记录
-            max_topics = int(self.config.get('topic_memory_config', {}).get('max_topics', 300))
-            if max_topics > 0 and len(db) > max_topics:
-                db.sort(key=lambda x: x.get("timestamp", ""))
-                db = db[-max_topics:]
-
             self._save_topic_db(db)
-            logger.info(f"[DataManager][add_topic]已记录话题记忆: id={topic_id}, keyword={keyword}")
+            logger.info(f"[DataManager][add_topic]已记录话题记忆: id={topic_id}, scope={scope}, text={text[:30]}")
             return topic_id
         except Exception as e:
             logger.error(f"[DataManager][add_topic]添加话题记忆失败: {e}", exc_info=True)
             return None
 
-    def get_all_topics(self) -> List[Dict]:
-        """获取全部话题记忆条目（含向量）"""
-        return self._load_topic_db()
+    def update_topic(
+        self,
+        topic_id: str,
+        text: str = '',
+        vector: Optional[List[float]] = None,
+        importance: Optional[int] = None,
+    ) -> bool:
+        """更新一条话题记忆（覆盖文本/向量/重要度），未找到返回 False"""
+        try:
+            db = self._load_topic_db()
+            for item in db:
+                if item.get('id') != topic_id:
+                    continue
+                if text:
+                    item['text'] = text
+                if vector:
+                    item['vector'] = vector
+                if importance is not None:
+                    item['importance'] = max(1, min(5, int(importance)))
+                item['updated_at'] = datetime.now().isoformat()
+                self._save_topic_db(db)
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[DataManager][update_topic]更新话题记忆失败: {e}", exc_info=True)
+            return False
 
-    def get_topic_count(self) -> int:
-        """获取当前话题记忆条数"""
-        return len(self._load_topic_db())
+    def delete_topic(self, topic_id: str) -> bool:
+        """删除一条话题记忆，未找到返回 False"""
+        try:
+            db = self._load_topic_db()
+            kept = [item for item in db if item.get('id') != topic_id]
+            if len(kept) == len(db):
+                return False
+            self._save_topic_db(kept)
+            return True
+        except Exception as e:
+            logger.error(f"[DataManager][delete_topic]删除话题记忆失败: {e}", exc_info=True)
+            return False
 
-    def clear_topics(self):
-        """清空话题记忆库"""
-        self._save_topic_db([])
-        logger.info("[DataManager][clear_topics]已清空话题记忆库")
+    def get_topics(self, scope: str) -> List[Dict]:
+        """获取某个会话的话题记忆"""
+        return [
+            item for item in self._load_topic_db()
+            if str(item.get('scope', '')) == (scope or '')
+        ]
+
+    def get_topic_count(self, scope: Optional[str] = None) -> int:
+        """获取话题记忆条数；指定 scope 时只统计该会话"""
+        if scope is None:
+            return len(self._load_topic_db())
+        return len(self.get_topics(scope))
+
+    def clear_topics(self, scope: Optional[str] = None):
+        """清空话题记忆库；指定 scope 时只清空该会话"""
+        if scope is None:
+            self._save_topic_db([])
+            logger.info("[DataManager][clear_topics]已清空话题记忆库")
+            return
+        kept = [item for item in self._load_topic_db() if str(item.get('scope', '')) != scope]
+        self._save_topic_db(kept)
+        logger.info(f"[DataManager][clear_topics]已清空会话话题记忆: {scope}")
 
     # --- 个人长期记忆（私聊，按用户分文件）存储 ---
     def _get_personal_memory_file(self, user_id: str) -> Path:
