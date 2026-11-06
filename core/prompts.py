@@ -212,11 +212,12 @@ TOPIC_MEMORY_ANALYSIS_PROMPT = """你在维护一个聊天场景的长期话题�
 {existing}
 
 新消息：
-{nickname}：{message}
+{speaker}：{message}
 
 规则：
 - 值得记：约定与计划、持续关注的人或事、重要事实、群体梗与称呼、明确偏好与雷点；一次性闲聊、临时情绪、猜测不记
 - 每条只写一个原子事实，30 字以内，第三人称陈述（如“群里约好周末一起打副本”）
+- 发言人以「昵称（QQ号）」标注；QQ 号是稳定身份，判断是否为同一人时以 QQ 号为准，昵称变化不代表换人
 - 与已有记忆重复、只是补充细节 → update，并填对应 id 覆盖原条目
 - 被明确指出记错、被否认、或事情已结束 → update 为最新状态或 delete 对应 id，不要保留过时内容
 - 普通闲聊、没有新信息 → 返回空数组
@@ -234,8 +235,13 @@ TOPIC_MEMORY_INJECTION_HEAD = """
 
 TOPIC_MEMORY_INJECTION_TAIL = "</相关话题记忆>"
 
+# 群聊注入时说明方括号内的 QQ 号含义（昵称可能变化，身份以 QQ 号为准）
+TOPIC_MEMORY_INJECTION_OWNER_NOTE = "方括号内是该条记忆所属群友的固定 QQ 号，昵称可能变化，判断身份时以 QQ 号为准。\n"
 
-def format_topic_memory_analysis_prompt(nickname: str, dialogue: str, existing: str = '', max_ops: int = 3) -> str:
+
+def format_topic_memory_analysis_prompt(
+    nickname: str, dialogue: str, existing: str = '', max_ops: int = 3, sender_id: str = ''
+) -> str:
     """
     格式化话题记忆判定提示词
 
@@ -244,37 +250,49 @@ def format_topic_memory_analysis_prompt(nickname: str, dialogue: str, existing: 
         dialogue: 当前这条消息
         existing: 该会话已有记忆的清单（带 id）
         max_ops: 单次最多操作条数
+        sender_id: 发言人 QQ 号（稳定身份标识）
 
     Returns:
         格式化后的提示词
     """
+    speaker = f"{nickname}（QQ{sender_id}）" if sender_id else nickname
     return TOPIC_MEMORY_ANALYSIS_PROMPT.format(
-        nickname=nickname,
+        speaker=speaker,
         message=dialogue,
         existing=existing or "（无）",
         max_ops=max_ops,
     )
 
 
-def format_topic_memory_injection(topics) -> str:
+def format_topic_memory_injection(topics, show_owner: bool = False) -> str:
     """
     将检索到的话题记忆拼装为注入文本
 
     Args:
-        topics: 话题列表，每项为 {"text": str}
+        topics: 话题列表，每项为 {"text": str, "owner_id": str}
+        show_owner: 是否显示归属 QQ 号（群聊时开启，私聊无需区分）
 
     Returns:
         注入文本（无有效话题时返回空字符串）
     """
     items = []
+    has_owner = False
     for topic in topics:
         text = str(topic.get("text", "")).strip()
         if not text:
             continue
-        items.append(f"- {text}")
+        owner_id = str(topic.get("owner_id", "") or "").strip()
+        if show_owner and owner_id:
+            items.append(f"- [QQ{owner_id}] {text}")
+            has_owner = True
+        else:
+            items.append(f"- {text}")
     if not items:
         return ""
-    return TOPIC_MEMORY_INJECTION_HEAD + "\n".join(items) + "\n" + TOPIC_MEMORY_INJECTION_TAIL
+    head = TOPIC_MEMORY_INJECTION_HEAD
+    if has_owner:
+        head += TOPIC_MEMORY_INJECTION_OWNER_NOTE
+    return head + "\n".join(items) + "\n" + TOPIC_MEMORY_INJECTION_TAIL
 
 
 # ==================== 群聊话题跟踪（续聊）相关提示词 ====================

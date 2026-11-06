@@ -538,10 +538,10 @@ class Core(Star):
                     text = text[:max_chars] + '…'
                 if max_injection_chars > 0 and total_chars + len(text) > max_injection_chars:
                     break
-                items.append({'text': text})
+                items.append({'text': text, 'owner_id': str(topic.get('owner_id', '') or '')})
                 total_chars += len(text)
 
-            injection = format_topic_memory_injection(items)
+            injection = format_topic_memory_injection(items, show_owner=bool(event.get_group_id()))
             if injection:
                 req.system_prompt = f"{req.system_prompt or ''}\n{injection}"
                 logger.info(
@@ -871,6 +871,7 @@ class Core(Star):
                     message=message,
                     existing=existing,
                     max_ops=topic_config.get('max_ops_per_extract', 3),
+                    sender_id=sender_id,
                 )
 
                 for operation in operations:
@@ -894,6 +895,7 @@ class Core(Star):
                         if not operation.get('id') or not self.data_manager.update_topic(
                             operation['id'],
                             text=text, vector=vector, importance=operation.get('importance'),
+                            owner_id=sender_id, owner_name=nickname,
                         ):
                             logger.warning("[Fiscok's][topic] 更新记忆失败或未找到目标条目，已跳过")
                         continue
@@ -906,10 +908,12 @@ class Core(Star):
                         self.data_manager.update_topic(
                             similar['id'],
                             text=text, vector=vector, importance=operation.get('importance'),
+                            owner_id=sender_id, owner_name=nickname,
                         )
                     else:
                         self.data_manager.add_topic(
-                            scope, text, vector, operation.get('importance', 3)
+                            scope, text, vector, operation.get('importance', 3),
+                            owner_id=sender_id, owner_name=nickname,
                         )
             except Exception as e:
                 logger.warning(f"[Fiscok's][topic] 后台话题记忆抽取失败，不影响主请求: {e}")
@@ -2020,9 +2024,12 @@ class Core(Star):
             yield event.plain_result("当前会话的话题记忆库为空")
             return
         recent = topics[-max(1, limit):]
+        is_group = bool(event.get_group_id())
         lines = [f"当前会话话题记忆共 {len(topics)} 条，最近 {len(recent)} 条："]
         for topic in recent:
-            lines.append(f"- {topic.get('text', '')}（id={topic.get('id', '')}）")
+            owner_id = str(topic.get('owner_id', '') or '')
+            prefix = f"[QQ{owner_id}] " if is_group and owner_id else ''
+            lines.append(f"- {prefix}{topic.get('text', '')}（id={topic.get('id', '')}）")
         lines.append("如需删除某条，发送：话题记忆管理 删除 <id 或关键词>")
         yield event.plain_result("\n".join(lines))
 

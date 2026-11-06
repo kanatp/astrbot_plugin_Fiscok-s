@@ -1122,13 +1122,23 @@ class DataManager:
         return f"topic_{now}_{rand}"
 
     # --- 话题记忆核心接口 ---
-    def add_topic(self, scope: str, text: str, vector: List[float], importance: int = 3) -> Optional[str]:
+    def add_topic(
+        self,
+        scope: str,
+        text: str,
+        vector: List[float],
+        importance: int = 3,
+        owner_id: str = '',
+        owner_name: str = '',
+    ) -> Optional[str]:
         """
         添加一条话题记忆（原子事实 + 词向量）
 
         :param scope: 归属会话（unified_msg_origin）
         :param text: 原子事实
         :param vector: 事实文本的词向量
+        :param owner_id: 事实所属用户的 QQ 号（稳定标识，昵称变化不影响归属）
+        :param owner_name: 记录时的昵称（仅作展示/追溯）
         :return: 成功返回 topic_id，失败返回 None
         """
         try:
@@ -1144,6 +1154,8 @@ class DataManager:
                 "text": text,
                 "vector": vector,
                 "importance": max(1, min(5, int(importance or 3))),
+                "owner_id": str(owner_id or ''),
+                "owner_name": str(owner_name or ''),
                 "timestamp": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
             })
@@ -1160,8 +1172,10 @@ class DataManager:
         text: str = '',
         vector: Optional[List[float]] = None,
         importance: Optional[int] = None,
+        owner_id: str = '',
+        owner_name: str = '',
     ) -> bool:
-        """更新一条话题记忆（覆盖文本/向量/重要度），未找到返回 False"""
+        """更新一条话题记忆（覆盖文本/向量/重要度，可同步同一归属者的最新昵称），未找到返回 False"""
         try:
             db = self._load_topic_db()
             for item in db:
@@ -1173,6 +1187,12 @@ class DataManager:
                     item['vector'] = vector
                 if importance is not None:
                     item['importance'] = max(1, min(5, int(importance)))
+                # 只有归属者为同一人（或原条目未记录归属）时才刷新归属信息，
+                # 避免把别人的记忆改名到当前发言人身上
+                if owner_id and (not item.get('owner_id') or item.get('owner_id') == owner_id):
+                    item['owner_id'] = owner_id
+                    if owner_name:
+                        item['owner_name'] = owner_name
                 item['updated_at'] = datetime.now().isoformat()
                 self._save_topic_db(db)
                 return True

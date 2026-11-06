@@ -70,11 +70,13 @@ async def extract_topic_memories(
     existing: List[Dict],
     max_ops: int = 3,
     timeout: float = 20.0,
+    sender_id: str = '',
 ) -> List[Dict]:
     """
     调用辅助 LLM，把这条消息转成针对某个会话记忆库的新增/更新/删除操作。
 
-    :param existing: 该会话已有的记忆条目（含 id/text）
+    :param existing: 该会话已有的记忆条目（含 id/text/owner_id）
+    :param sender_id: 发言人 QQ 号（稳定身份标识，昵称变化不影响归属）
     :return: 操作列表，每项 {"action": add|update|delete, "text": str, "importance": int, "id": str}
     """
     if not message or not message.strip():
@@ -95,12 +97,14 @@ async def extract_topic_memories(
             text = str(item.get('text', '')).strip()
             if not text:
                 continue
-            lines.append(f"- id={item.get('id', '')}：{text[:60]}")
+            owner_id = str(item.get('owner_id', '') or '').strip()
+            prefix = f"[QQ{owner_id}] " if owner_id else ''
+            lines.append(f"- id={item.get('id', '')}：{prefix}{text[:60]}")
 
         response = await asyncio.wait_for(
             provider.text_chat(
                 prompt=format_topic_memory_analysis_prompt(
-                    nickname, message, "\n".join(lines), max_ops
+                    nickname, message, "\n".join(lines), max_ops, sender_id
                 ),
                 system_prompt=TOPIC_MEMORY_ANALYSIS_SYSTEM_PROMPT,
                 temperature=TOPIC_DECISION_TEMPERATURE,
@@ -201,6 +205,8 @@ def retrieve_topics(
                 continue
             scored.append({
                 "text": text,
+                "owner_id": str(topic.get("owner_id", "") or ""),
+                "owner_name": str(topic.get("owner_name", "") or ""),
                 "similarity": sim,
             })
 
