@@ -154,40 +154,54 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 - `proactive_chat_config`：主动发起聊天开关、生成辅助 LLM、冷场下限/上限（分钟）、安静时段、开口概率、每日上限、发言冷却、参考消息条数与截断、单条字符上限、群聊白名单；另有私聊主动开关、私聊用户白名单（QQ 号，留空为全部）、私聊冷场下限/上限与私聊每日上限。
 - `context_optimize_config`：上下文精简开关、保留最近消息条数、上下文总字符上限（默认关闭）。
 - `persona_evolution_config`：人设演化开关、演化辅助 LLM、每多少条回复尝试演化、参考对话条数与单条截断、自我设定最大字符数（默认关闭）。
-- `suzu_bridge_config`：桌面端桥接开关、监听地址 / 端口、访问令牌、桌面聊天 Provider、桌面端专属记忆身份与称呼（默认关闭）。
+- `suzu_bridge_config`：Live2D 桌面端与 WebUI 的启用开关、监听地址（默认 `127.0.0.1` 仅本机）与端口；令牌、白名单、桌面聊天 Provider、桌面身份与表情映射等其余设置全部放在 WebUI 的 Live2D 标签页。
 
 ## 桌面端桥接（Live2D 模型）
 
 开启 `suzu_bridge_config.available` 后，插件会额外启动一个独立的 aiohttp 服务（与 AstrBot 面板端口无关），供桌面端模型读取人设、记忆并把聊天交给同一个模型：
 
 - 接口：`GET /suzu/health`、`GET /suzu/bootstrap`、`POST /suzu/chat`、`GET /suzu/memory`、`POST /suzu/memory/note`、`POST /suzu/persona/evolve`
-- 鉴权：除 `/suzu/health` 外都需要 `Authorization: Bearer <token>`；未配置 token 且未配置白名单时服务会被强制限制在 `127.0.0.1`
+- 鉴权：除 `/suzu/health` 外都需要 `Authorization: Bearer <token>`；未配置 token 且未配置白名单时，`/suzu` 接口只接受本机请求（WebUI 有独立的密码会话，仍可远程访问）
 - 来源限制：`allowed_ips` 支持 CIDR 白名单（留空不限制）；`trusted_proxies` 决定哪些地址发来的 `X-Forwarded-For` / `X-Real-IP` 会被采信，防止客户端伪造来源绕过白名单
 - 桌面端使用独立的 `default_user_id`（默认 `desktop_suzu`）保存个人记忆与好感度，与 QQ 用户互不覆盖；人设基线、演化自我设定与情绪状态则是两边共享的
 - 桌面聊天会复用插件的人设叠加、情绪/好感度与个人记忆注入，并把桌面对话计入人设演化
 
 #### LLM 对 Live2D 的控制范围
 
-插件侧 LLM 只产出文本与状态，不直接编排动作。`POST /suzu/chat` 返回：
+插件侧不直接编排动作，而是把回复与状态整理成客户端可直接消费的控制块。`POST /suzu/chat` 返回：
 
 ```json
-{ "reply": "...", "emotion": "开心", "affinity": 62 }
+{
+  "reply": "好呀，今天想聊什么？",
+  "emotion": "开心",
+  "affinity": 62,
+  "live2d": {
+    "emotion": "开心",
+    "affinity": 62,
+    "expression": "smile",
+    "motion": "",
+    "segments": ["好呀，", "今天想聊什么？"]
+  }
+}
 ```
 
-桌面端 `Kira Live` 主进程拿到后，目前只做粗略映射：`emotion` 含「难过 / 低落」时播放 `sad` 表情，其余播放 `smile`，并固定附带 `yesNod` 动作。也就是说，LLM 能影响「看起来高兴还是低落」，但不能选择具体动作或姿态。
-
-本地规则 Brain（MockBrain）在 AstrBot 不可用或请求失败时才接管，它能给出更细的 `expression / motions / pose`，但这不是 LLM 输出。若要让 LLM 精确控制 Live2D，需要把桥接返回扩展为结构化的 `expression`、`motions`、`pose`，并在桌面端用模型能力白名单校验后再播放。
+- `expression` / `motion` 由 WebUI Live2D 标签页里配置的「关键词 → 表情 / 动作」映射按当前情绪匹配得出；客户端识别不到对应表情时直接忽略即可
+- `segments` 按换行切分，供桌宠逐条气泡显示或逐句 TTS
+- `GET /suzu/bootstrap` 的 `live2d` 字段返回当前可用映射与支持的控制项（`expression` / `motion` / `segments`），客户端可据此校验模型能力
+- 若桌面端自带更细的姿态系统，可继续用本地 Brain 兜底；桥接只提供插件侧能确定的状态
 
 ### Fiscok_webui（类 NapCat 登录）
 
 桥接服务同时提供 `Fiscok_webui`（密码登录的插件管理面板），与 `/suzu` 共用监听端口：
 
+- 默认监听 `127.0.0.1`，只有本机能访问；要从其他机器访问，在插件配置把 `suzu_bridge_config.host` 改为 `0.0.0.0`（面板密码仍是第一道防护），或通过反向代理转发
 - 访问 `http://<插件地址>:6199/`，用随机生成的本机密码登录
 - 首次启动随机生成 10 位密码，写入插件数据目录 `suzu_webui.json`，并打印在 AstrBot 本机日志（与 NapCat 在控制台打印 token 一致）
-- 页面可查看桥接状态、IP 白名单、桌面端最近连接 / 聊天时间，以及人设、情绪、好感度与个人记忆；支持手动「演化一次」和写入记忆
+- 页面按标签页划分：概览 / Live2D / 记忆 / 表情包 / 情绪好感 / 插件配置
+- Live2D 标签页集中管理桌面端相关的一切：访问令牌、来源 IP 白名单、可信反向代理、桌面聊天 Provider、默认称呼与记忆身份、情绪 → 表情 / 动作映射，并提供「重启服务」；监听地址与端口属于启动引导配置，仍在插件配置里修改
+- 概览：桥接运行状态、桌面端最近连接 / 聊天时间；支持手动「演化一次」
+- 记忆：话题记忆按会话切换、私聊记忆按用户切换，均可修改内容与重要度、单条删除与清空
 - 表情包库：缩略图预览、关键字搜索、按标签 / 情绪筛选，可编辑描述、标签与情绪，支持单条删除与清空
-- 话题记忆：按会话切换，可修改记忆内容与重要度，支持单条删除与清空当前会话
-- 私聊记忆：按用户切换，可修改记忆内容与重要度，支持单条删除与清空该用户
 - 情绪与好感度：直接修改全局情绪文字（可选同时写为默认情绪），查看并调整每个用户的好感度、恢复默认值
 - 插件配置：在线修改表情包、话题记忆、个人记忆、情绪与好感度、人设演化的开关和阈值，保存后写入 AstrBot 插件配置
 - 会话使用 HttpOnly + SameSite=Strict 的签名 Cookie，12 小时过期；登录失败 5 次后封禁 10 分钟
@@ -230,22 +244,25 @@ server {
 }
 ```
 
-配套的插件配置：
+配套的插件配置（只有启动引导项）：
 
 ```json
 "suzu_bridge_config": {
   "available": true,
   "host": "127.0.0.1",
-  "port": 6199,
-  "token": "至少 32 位随机字符串",
-  "allowed_ips": ["127.0.0.1"],
-  "trusted_proxies": ["127.0.0.1", "::1"]
+  "port": 6199
 }
 ```
 
-`allowed_ips` 在反代模式下只需填代理自身的地址（同机即 `127.0.0.1`），真实客户端地址由 nginx 的 `X-Forwarded-For` 传入；nginx 的 `allow/deny` 才是面向公网的客户 IP 白名单。桌面端 Console 的地址填 `https://suzu.example.com/suzu`，令牌与插件里保持一致。
+`allowed_ips`、`trusted_proxies` 与访问令牌改到 WebUI 的 Live2D 标签页里配置。`allowed_ips` 在反代模式下只需填代理自身的地址（同机即 `127.0.0.1`），真实客户端地址由 nginx 的 `X-Forwarded-For` 传入；nginx 的 `allow/deny` 才是面向公网的客户 IP 白名单。桌面端 Console 的地址填 `https://suzu.example.com/suzu`，令牌与 WebUI 里保存的一致。
 
 ## 版本说明
+
+### v2.3
+- Live2D 桌面端与 WebUI 服务默认只监听 `127.0.0.1`，不再默认对外开放；监听地址与端口作为引导配置保留在插件配置 `suzu_bridge_config`，其余 Live2D 设置全部迁移到 WebUI。
+- WebUI 改为标签页布局：概览 / Live2D / 记忆 / 表情包 / 情绪好感 / 插件配置；新增的 Live2D 标签页集中管理访问令牌、IP 白名单、可信反向代理、桌面聊天 Provider、默认称呼与记忆身份、情绪 → 表情 / 动作映射，并可「重启服务」。
+- 调整安全策略：WebUI 有自己的密码会话，可远程访问；未配置令牌与白名单时，桌面桥接 `/suzu` 接口仅接受本机请求，不再整站强制回退到本机监听。
+- `POST /suzu/chat` 新增 `live2d` 控制块（`emotion` / `affinity` / `expression` / `motion` / `segments`），`GET /suzu/bootstrap` 同步返回可用映射，桌面端可直接消费；`suzu_bridge_config` 清理为 `available` / `host` / `port` 三项。
 
 ### v2.2
 - 新增**主动发起聊天（群聊冷场救场）**：随机冷场区间、开口概率、`[SKIP]` 读空气、作息时段、每日上限与发言冷却、群聊白名单；参考群聊最近记录与自己最近发言，避免复读。

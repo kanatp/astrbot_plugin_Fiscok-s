@@ -81,7 +81,7 @@ def _strip_internal_leaks(text: str) -> str:
     return text
 
 
-@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "2.2")
+@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "2.3")
 class Core(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -1363,7 +1363,7 @@ class Core(Star):
     def _init_suzu_bridge(self, config: Dict):
         """按配置启动小铃桌面端 HTTP 桥接（未启用时完全不影响插件）"""
         bridge_cfg = config.get('suzu_bridge_config', {}) or {}
-        if not bridge_cfg.get('available', False):
+        if not bridge_cfg.get('available', True):
             return
         try:
             from .core.suzu_bridge import SuzuBridge

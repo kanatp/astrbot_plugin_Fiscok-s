@@ -601,60 +601,26 @@
     }
   },
   "suzu_bridge_config": {
-    "description": "桌面端桥接：给 Live2D 模型提供人设、记忆与聊天接口",
+    "description": "Live2D 桌面端与 WebUI 服务（访问令牌、白名单等其余设置请到 WebUI 的 Live2D 标签页）",
     "type": "object",
     "items": {
       "available": {
-        "description": "是否启用 Kira Live Bridge HTTP 接口",
+        "description": "启用 Live2D 桌面端桥接与 WebUI 服务",
         "type": "bool",
-        "default": false
+        "default": true,
+        "hint": "默认只监听本机，不对外开放；关闭后既没有桌面桥接，也无法访问 WebUI"
       },
       "host": {
         "description": "监听地址",
         "type": "string",
-        "default": "0.0.0.0",
-        "hint": "使用反向代理时建议改为 127.0.0.1，只让本机 nginx 转发，避免绕过白名单直连"
+        "default": "127.0.0.1",
+        "hint": "默认仅本机可访问；需要局域网/公网访问时改为 0.0.0.0，并务必在 WebUI 配置访问令牌或使用反向代理"
       },
       "port": {
         "description": "监听端口",
         "type": "int",
         "default": 6199,
-        "hint": "需要与桌面端 Console 里的服务地址端口一致"
-      },
-      "token": {
-        "description": "访问令牌（Bearer Token）",
-        "type": "string",
-        "default": "",
-        "hint": "建议至少 16 位随机字符串；留空时服务会被强制限制在 127.0.0.1"
-      },
-      "allowed_ips": {
-        "description": "来源 IP 白名单（支持 CIDR，如 192.168.1.0/24 或单个 IPv6）",
-        "type": "list",
-        "default": [],
-        "hint": "留空表示不限制来源；配置后只有白名单内的地址能访问，与令牌同时生效"
-      },
-      "trusted_proxies": {
-        "description": "可信反向代理地址（这些地址发来的 X-Forwarded-For 才会被采信）",
-        "type": "list",
-        "default": ["127.0.0.1", "::1"],
-        "hint": "同机 nginx 保持默认即可；代理不在本机时填代理的出口地址"
-      },
-      "llm_provider_id": {
-        "description": "桌面聊天使用的 LLM Provider",
-        "type": "string",
-        "default": "",
-        "_special": "select_provider",
-        "hint": "留空时使用第一个可用模型"
-      },
-      "default_user_id": {
-        "description": "桌面端专属记忆身份 ID（与 QQ 用户隔离）",
-        "type": "string",
-        "default": "desktop_suzu"
-      },
-      "default_nickname": {
-        "description": "桌面端默认称呼",
-        "type": "string",
-        "default": "小主人"
+        "hint": "WebUI 与桌面桥接共用该端口；修改后需重载插件或在 WebUI 点「重启服务」"
       }
     }
   }

@@ -26,6 +26,7 @@ from .api.persona_evolution_apis import evolve_persona
 from .api.personal_memory_apis import retrieve_memories
 from .api.provider_utils import resolve_provider
 from .api.topic_memory_apis import get_text_embedding, resolve_embedding_provider
+from .suzu_settings import Live2DSettings
 from .prompts import (
     format_emotion_state_injection,
     format_persona_overlay_injection,
@@ -96,17 +97,11 @@ class SuzuBridge:
     def __init__(self, plugin: Any, config: Dict[str, Any]):
         self.plugin = plugin
         self.config = config or {}
-        self.host = str(self.config.get("host") or "0.0.0.0").strip()
+        # 监听地址与端口是启动前必须确定的引导配置，其余 Live2D 设置在 WebUI 里维护。
+        self.host = str(self.config.get("host") or "127.0.0.1").strip()
         self.port = int(self.config.get("port") or 6199)
-        self.token = str(self.config.get("token") or "").strip()
-        self.default_user_id = str(self.config.get("default_user_id") or "desktop_suzu").strip()
-        self.default_nickname = str(self.config.get("default_nickname") or "小主人").strip()
-        self.llm_provider_id = str(self.config.get("llm_provider_id") or "").strip()
-        self.allowed_networks = _parse_networks(self.config.get("allowed_ips"))
-        trusted = self.config.get("trusted_proxies")
-        if trusted is None:
-            trusted = ["127.0.0.1", "::1"]
-        self.trusted_networks = _parse_networks(trusted)
+        self.settings = Live2DSettings(plugin)
+        self.apply_settings(self.settings.data)
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
         self._started = False
@@ -126,23 +121,83 @@ class SuzuBridge:
         except Exception as exc:
             logger.error(f"[Fiscok's][suzu] 插件 WebUI 初始化失败，仅启用桥接: {exc}")
 
+    # ---------------- 运行期设置 ----------------
+
+    def apply_settings(self, data: Dict[str, Any]) -> None:
+        """把 WebUI 保存的设置应用到运行中的桥接（令牌/白名单立即生效）"""
+        self.token = str(data.get("token") or "").strip()
+        self.default_user_id = str(data.get("default_user_id") or "desktop_suzu").strip()
+        self.default_nickname = str(data.get("default_nickname") or "小主人").strip()
+        self.llm_provider_id = str(data.get("llm_provider_id") or "").strip()
+        self.allowed_networks = _parse_networks(data.get("allowed_ips") or [])
+        self.trusted_networks = _parse_networks(
+            data.get("trusted_proxies") or ["127.0.0.1", "::1"]
+        )
+
+    @property
+    def local_only(self) -> bool:
+        """没有令牌也没有白名单时，/suzu 接口只接受本机请求"""
+        return not self.token and not self.allowed_networks
+
+    def save_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """校验并保存 WebUI 提交的设置，返回生效后的设置"""
+        data = self.settings.save(payload)
+        self.apply_settings(data)
+        whitelist = f"{len(self.allowed_networks)} 条" if self.allowed_networks else "未限制"
+        logger.info(
+            f"[Fiscok's][suzu] Live2D 设置已更新 "
+            f"(token={'已配置' if self.token else '未配置'}, 白名单={whitelist})"
+        )
+        return data
+
+    def settings_view(self) -> Dict[str, Any]:
+        """供 WebUI 展示的 Live2D 设置与服务状态"""
+        data = dict(self.settings.data)
+        data["expression_map"] = list(data.get("expression_map") or [])
+        data.update(
+            {
+                "host": self.host,
+                "port": self.port,
+                "started": self._started,
+                "localOnly": self.local_only,
+            }
+        )
+        return data
+
+    async def restart(self) -> Dict[str, Any]:
+        """按当前插件配置重新加载监听地址与端口"""
+        old_host, old_port = self.host, self.port
+        await self.stop()
+        section = self.plugin.config.get("suzu_bridge_config", {}) or {}
+        self.host = str(section.get("host") or "127.0.0.1").strip()
+        try:
+            self.port = int(section.get("port") or 6199)
+        except (TypeError, ValueError):
+            self.port = 6199
+        await self.start()
+        if not self._started and (self.host, self.port) != (old_host, old_port):
+            # 新地址启动失败时回退到原地址，避免 WebUI 直接失联。
+            logger.warning(
+                f"[Fiscok's][suzu] 新地址 {self.host}:{self.port} 启动失败，"
+                f"回退到 {old_host}:{old_port}"
+            )
+            self.host, self.port = old_host, old_port
+            await self.start()
+        return {"ok": self._started, "host": self.host, "port": self.port}
+
     # ---------------- 生命周期 ----------------
 
     async def start(self) -> None:
         if self._started:
             return
-        if (
-            not self.token
-            and not self.allowed_networks
-            and self.host not in ("127.0.0.1", "localhost", "::1")
-        ):
-            # 既没有令牌也没有白名单时绝不暴露到公网，退回本机监听。
+        if not self.token and not self.allowed_networks:
+            # WebUI 有独立的密码会话，可远程访问；但 /suzu 接口只接受本机请求，
+            # 由鉴权中间件拦截，避免默认暴露聊天接口。
             logger.warning(
                 "[Fiscok's][suzu] 未配置访问令牌与 IP 白名单，"
-                "Kira Live Bridge 已强制只监听 127.0.0.1"
+                "桌面桥接 /suzu 接口只接受本机请求；WebUI 仍可正常访问"
             )
-            self.host = "127.0.0.1"
-        if not self.token:
+        elif not self.token:
             logger.warning("[Fiscok's][suzu] 未配置访问令牌，仅靠 IP 白名单防护")
 
         app = web.Application(middlewares=[self._auth_middleware])
@@ -175,6 +230,8 @@ class SuzuBridge:
             f"[Fiscok's][suzu] 桌面桥接已启动: http://{self.host}:{self.port}/suzu "
             f"(token={'已配置' if self.token else '未配置'}, 白名单={whitelist})"
         )
+        logger.info(f"[Fiscok's][suzu] WebUI 地址: http://{self.host}:{self.port}/ "
+                    f"(密码见本机日志或插件数据目录 suzu_webui.json)")
 
     async def stop(self) -> None:
         if not self._started:
@@ -202,13 +259,27 @@ class SuzuBridge:
             return _error("来源地址不在白名单", 403)
         if request.method == "OPTIONS":
             return web.Response(status=204)
+        # 未配置令牌与白名单时，桌面桥接接口只接受本机请求；WebUI 有自己的密码会话，不受影响。
+        # 这里用 _client_ip：经可信反代访问时会取 X-Forwarded-For，避免把代理的 127.0.0.1 当成客户端。
+        if (
+            self.local_only
+            and request.path.startswith("/suzu/")
+            and request.path != "/suzu/health"
+            and not self._is_loopback(self._client_ip(request))
+        ):
+            self.reject_count += 1
+            logger.warning(
+                f"[Fiscok's][suzu] 拒绝 {self._client_ip(request) or '未知地址'} 访问 "
+                f"{request.path}：未配置访问令牌，仅允许本机调用"
+            )
+            return _error("未配置访问令牌，桌面桥接仅允许本机访问", 403)
         # 插件 WebUI 使用独立的密码会话，不走桌面端令牌。
         if request.path == "/" or request.path.startswith("/ui/"):
             return await handler(request)
         if request.path == "/suzu/health":
             return await handler(request)
         if not self.token:
-            # 无令牌模式仅在 127.0.0.1 生效（start 已保证）。
+            # 无令牌模式已由上面的本机请求限制保护。
             return await handler(request)
         header = request.headers.get("Authorization", "")
         supplied = header[7:] if header.lower().startswith("bearer ") else ""
@@ -261,6 +332,17 @@ class SuzuBridge:
         except ValueError:
             return False
         return any(address in network for network in networks)
+
+    @staticmethod
+    def _is_loopback(ip_text: str) -> bool:
+        if not ip_text:
+            return False
+        if ip_text in ("localhost", "::1"):
+            return True
+        try:
+            return ip_address(ip_text).is_loopback
+        except ValueError:
+            return False
 
     # ---------------- 数据辅助 ----------------
 
@@ -403,6 +485,17 @@ class SuzuBridge:
                     "count": len(memories),
                     "items": [self._memory_item(item) for item in memories[:20]],
                 },
+                "live2d": {
+                    "expressions": [
+                        {
+                            "keywords": item.get("keywords", []),
+                            "expression": item.get("expression", ""),
+                            "motion": item.get("motion", ""),
+                        }
+                        for item in self.settings.data.get("expression_map", [])
+                    ],
+                    "supports": ["expression", "motion", "segments"],
+                },
                 "features": features,
             }
         )
@@ -510,6 +603,9 @@ class SuzuBridge:
                 "reply": reply,
                 "emotion": str(self.plugin.current_emotion or ""),
                 "affinity": affinity,
+                "live2d": self.settings.build_live2d_control(
+                    str(self.plugin.current_emotion or ""), affinity, reply
+                ),
             }
         )
 

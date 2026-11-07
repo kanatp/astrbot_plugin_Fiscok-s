@@ -222,6 +222,9 @@ class SuzuWebUI:
         app.router.add_get("/ui/api/emotion", self._emotion_get)
         app.router.add_post("/ui/api/emotion", self._emotion_set)
         app.router.add_post("/ui/api/affinity", self._affinity_set)
+        app.router.add_get("/ui/api/live2d", self._live2d_get)
+        app.router.add_post("/ui/api/live2d", self._live2d_set)
+        app.router.add_post("/ui/api/live2d/restart", self._live2d_restart)
 
     async def _page(self, request: web.Request) -> web.Response:
         return web.Response(
@@ -375,6 +378,7 @@ class SuzuWebUI:
                 "address": address,
                 "token": bridge.token,
                 "hasToken": bool(bridge.token),
+                "localOnly": bridge.local_only,
                 "whitelist": [str(item) for item in bridge.allowed_networks],
                 "trusted": [str(item) for item in bridge.trusted_networks],
                 "requests": bridge.request_count,
@@ -942,3 +946,121 @@ class SuzuWebUI:
             max_=meta["max"],
         )
         return _json({"ok": True, "affinity": result.get("affinity", affinity)})
+
+    # ---------------- Live2D 设置 ----------------
+
+    def _providers(self) -> List[Dict[str, str]]:
+        """列出可用于桌面聊天的文本 Provider（只用于下拉选择）"""
+        try:
+            providers = self.plugin.context.get_all_providers()
+        except Exception as exc:
+            logger.warning(f"[Fiscok's][suzu] 读取 Provider 列表失败: {exc}")
+            return []
+        result: List[Dict[str, str]] = []
+        for provider in providers:
+            config = getattr(provider, "provider_config", {}) or {}
+            provider_id = str(config.get("id") or "").strip()
+            if not provider_id:
+                continue
+            model = str(
+                config.get("model")
+                or (config.get("model_config") or {}).get("model")
+                or ""
+            ).strip()
+            result.append({
+                "id": provider_id,
+                "label": f"{provider_id}（{model}）" if model else provider_id,
+            })
+        return result
+
+    @staticmethod
+    def _parse_expression_map(text: str) -> List[Dict[str, Any]]:
+        """把「关键词1,关键词2 = 表情 / 动作」逐行解析成映射表"""
+        result: List[Dict[str, Any]] = []
+        for line in str(text or "").splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith("#"):
+                continue
+            if "=>" in raw:
+                left, right = raw.split("=>", 1)
+            elif "=" in raw:
+                left, right = raw.split("=", 1)
+            else:
+                continue
+            keywords = [
+                item.strip()
+                for item in left.replace("，", ",").split(",")
+                if item.strip()
+            ]
+            parts = [
+                item.strip()
+                for item in right.replace("，", "/").split("/")
+                if item.strip()
+            ]
+            if not keywords or not parts:
+                continue
+            result.append({
+                "keywords": keywords[:10],
+                "expression": parts[0][:40],
+                "motion": (parts[1] if len(parts) > 1 else "")[:40],
+            })
+            if len(result) >= 20:
+                break
+        return result
+
+    async def _live2d_get(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        return _json({
+            "ok": True,
+            "settings": self.bridge.settings_view(),
+            "providers": self._providers(),
+        })
+
+    async def _live2d_set(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        payload = await _read_json(request)
+        changes: Dict[str, Any] = {}
+        for key in ("token", "llm_provider_id", "default_user_id", "default_nickname"):
+            if key in payload:
+                changes[key] = payload.get(key)
+        if "allowed_ips" in payload:
+            changes["allowed_ips"] = payload.get("allowed_ips")
+        if "trusted_proxies" in payload:
+            changes["trusted_proxies"] = payload.get("trusted_proxies")
+        if "expression_map_text" in payload:
+            changes["expression_map"] = self._parse_expression_map(
+                payload.get("expression_map_text")
+            )
+        if not changes:
+            return _json({"ok": False, "error": "没有可保存的设置"}, 400)
+        try:
+            data = self.bridge.save_settings(changes)
+        except Exception as exc:
+            logger.error(f"[Fiscok's][suzu] 保存 Live2D 设置失败: {exc}")
+            return _json({"ok": False, "error": f"保存失败: {exc}"}, 500)
+        return _json({"ok": True, "settings": data})
+
+    async def _live2d_restart(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        # 当前请求本身就跑在这个 aiohttp 应用里，先返回响应再重建监听，避免连接被直接掐断。
+        asyncio.create_task(self._restart_bridge_later())
+        return _json({"ok": True, "pending": True, "settings": self.bridge.settings_view()})
+
+    async def _restart_bridge_later(self) -> None:
+        await asyncio.sleep(0.6)
+        try:
+            result = await self.bridge.restart()
+        except Exception as exc:
+            logger.error(f"[Fiscok's][suzu] 重启服务失败: {exc}", exc_info=True)
+            return
+        if not result.get("ok"):
+            logger.error(
+                f"[Fiscok's][suzu] 端口 {result.get('port')} 启动失败，"
+                "请检查插件配置里的监听地址/端口是否被占用"
+            )
