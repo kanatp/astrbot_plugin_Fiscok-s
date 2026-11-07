@@ -398,18 +398,8 @@ class SuzuBridge:
         return f"desktop:{user_id}"
 
     def _persona_umos(self, user_id: str) -> List[tuple]:
-        """人设基线优先复用绑定 QQ 的真实会话 umo，其次才回退到桌面虚拟 umo。"""
-        pairs: List[tuple] = []
-        if self.memory_qq:
-            try:
-                for inst in self.plugin.context.platform_manager.get_insts():
-                    pid = str(getattr(inst.meta(), "id", "") or "")
-                    if pid and ("qq" in pid.lower() or "napcat" in pid.lower()):
-                        pairs.append((pid, f"{pid}:FriendMessage:{self.memory_qq}"))
-            except Exception as exc:
-                logger.warning(f"[Fiscok's][suzu] 解析 QQ 平台失败: {exc}")
-        pairs.append(("", self._umo(user_id)))
-        return pairs
+        """基线只用 AstrBot 默认/指定人格，不把 QQ 会话人格当作基线。"""
+        return [("", self._umo(user_id))]
 
     @staticmethod
     def _persona_fields(persona: Any) -> Dict[str, str]:
@@ -803,26 +793,7 @@ class SuzuBridge:
     def _record_dialogue(
         self, umo: str, user_id: str, nickname: str, user_text: str, reply: str
     ) -> None:
-        """把桌面端对话接入插件原有的人设演化与情绪/好感度链路。"""
-        persona_cfg = self.plugin.config.get("persona_evolution_config", {}) or {}
-        if persona_cfg.get("available", False):
-            self.plugin._append_persona_line(umo, nickname, user_text, persona_cfg)
-            self.plugin._append_persona_line(umo, "我", reply, persona_cfg)
-            every = int(persona_cfg.get("evolve_every_messages", 10) or 0)
-            if every > 0:
-                self.plugin._persona_reply_count += 1
-                if (
-                    self.plugin._persona_reply_count >= every
-                    and not self.plugin._persona_evolve_pending
-                ):
-                    self.plugin._persona_reply_count = 0
-                    self.plugin._persona_evolve_pending = True
-                    dialogue = "\n".join(self.plugin._persona_recent.get(umo, []))
-                    if dialogue:
-                        self.plugin._spawn_background(
-                            self.plugin._run_persona_evolution(dialogue, persona_cfg)
-                        )
-
+        """桌面端只消费共享的演化内容，不参与人设演化；情绪与好感度照常共享。"""
         emotion_cfg = self.plugin.config.get("emotion_config", {}) or {}
         if emotion_cfg.get("available", False):
             self.plugin._schedule_emotion_analysis(
