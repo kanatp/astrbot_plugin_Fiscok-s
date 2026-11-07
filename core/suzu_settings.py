@@ -26,6 +26,7 @@ DEFAULTS: Dict[str, Any] = {
     "llm_provider_id": "",
     "default_user_id": "desktop_suzu",
     "memory_qq": "",
+    "persona_id": "",
     "default_nickname": "小主人",
     "expression_map": DEFAULT_EXPRESSION_MAP,
 }
@@ -110,6 +111,7 @@ class Live2DSettings:
             "llm_provider_id": text("llm_provider_id", "", 80),
             "default_user_id": text("default_user_id", "desktop_suzu", 80) or "desktop_suzu",
             "memory_qq": "".join(ch for ch in text("memory_qq", "", 30) if ch.isdigit()),
+            "persona_id": text("persona_id", "", 80),
             "default_nickname": text("default_nickname", "小主人", 40) or "小主人",
             "expression_map": expression_map[:20],
         }

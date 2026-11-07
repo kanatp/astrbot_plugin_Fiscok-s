@@ -128,6 +128,7 @@ class SuzuBridge:
         self.token = str(data.get("token") or "").strip()
         self.default_user_id = str(data.get("default_user_id") or "desktop_suzu").strip()
         self.memory_qq = str(data.get("memory_qq") or "").strip()
+        self.persona_id = str(data.get("persona_id") or "").strip()
         self.default_nickname = str(data.get("default_nickname") or "小主人").strip()
         self.llm_provider_id = str(data.get("llm_provider_id") or "").strip()
         self.allowed_networks = _parse_networks(data.get("allowed_ips") or [])
@@ -155,6 +156,15 @@ class SuzuBridge:
         """供 WebUI 展示的 Live2D 设置与服务状态"""
         data = dict(self.settings.data)
         data["expression_map"] = list(data.get("expression_map") or [])
+        try:
+            data["personas"] = [
+                str(item.get("name") or "")
+                for item in self.plugin.context.persona_manager.personas_v3
+                if item.get("name")
+            ]
+        except Exception as exc:
+            logger.warning(f"[Fiscok's][suzu] 读取人格列表失败: {exc}")
+            data["personas"] = []
         data.update(
             {
                 "host": self.host,
@@ -412,6 +422,14 @@ class SuzuBridge:
         return {"name": _clip(name, 40), "prompt": _clip(prompt, 4000)}
 
     async def _baseline_persona(self, user_id: str, umo: str) -> Dict[str, str]:
+        if self.persona_id:
+            try:
+                persona = self.plugin.context.persona_manager.get_persona_v3_by_id(self.persona_id)
+                fields = self._persona_fields(persona)
+                if fields["prompt"]:
+                    return fields
+            except Exception as exc:
+                logger.warning(f"[Fiscok's][suzu] 读取指定人格 {self.persona_id} 失败: {exc}")
         for platform_id, candidate in self._persona_umos(user_id):
             try:
                 if platform_id:

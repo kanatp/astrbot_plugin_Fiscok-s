@@ -656,6 +656,11 @@
               <div class="hint">填写后桌面端直接使用该 QQ 的个人记忆与好感度，和私聊完全一致。</div>
             </div>
             <div class="field">
+              <label for="l2d-persona">人设基线人格</label>
+              <select id="l2d-persona"></select>
+              <div class="hint">选「跟随 AstrBot」则用绑定 QQ 的私聊人格；也可指定某个 AstrBot 人格（如 FisTohu）作为基线。</div>
+            </div>
+            <div class="field">
               <label for="l2d-user">桌面端记忆身份 ID（未绑定 QQ 时使用）</label>
               <input id="l2d-user" type="text" maxlength="80" />
             </div>
@@ -667,7 +672,7 @@
               <label for="l2d-trusted">可信反向代理（每行一个）</label>
               <textarea id="l2d-trusted" placeholder="同机 nginx 保持 127.0.0.1 / ::1"></textarea>
             </div>
-            <div class="field">
+            <div class="field wide">
               <label for="l2d-map">情绪 → 表情 / 动作映射</label>
               <textarea id="l2d-map" placeholder="开心,高兴 = smile / tap_head"></textarea>
               <div class="hint">每行格式：关键词1,关键词2 = 表情 / 动作（动作可省略）。关键词匹配当前情绪文字；留空则全部使用客户端默认。</div>
@@ -1069,6 +1074,10 @@
         $('l2d-nickname').value = settings.default_nickname || ''
         $('l2d-memory-qq').value = settings.memory_qq || ''
         $('l2d-user').value = settings.default_user_id || ''
+        const personaSel = $('l2d-persona')
+        personaSel.innerHTML = '<option value="">跟随 AstrBot（绑定 QQ 的私聊人格）</option>' +
+          (settings.personas || []).map((name) => '<option value="' + esc(name) + '">' + esc(name) + '</option>').join('')
+        personaSel.value = settings.persona_id || ''
         $('l2d-allowed').value = (settings.allowed_ips || []).join('\n')
         $('l2d-trusted').value = (settings.trusted_proxies || []).join('\n')
         $('l2d-map').value = expressionMapText(settings.expression_map)
@@ -1083,6 +1092,7 @@
             llm_provider_id: $('l2d-provider').value,
             default_nickname: $('l2d-nickname').value.trim(),
             memory_qq: $('l2d-memory-qq').value.trim(),
+            persona_id: $('l2d-persona').value,
             default_user_id: $('l2d-user').value.trim(),
             allowed_ips: linesToArray($('l2d-allowed').value),
             trusted_proxies: linesToArray($('l2d-trusted').value),

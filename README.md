@@ -163,7 +163,7 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 - 接口：`GET /suzu/health`、`GET /suzu/bootstrap`、`POST /suzu/chat`、`GET /suzu/memory`、`POST /suzu/memory/note`、`POST /suzu/persona/evolve`
 - 鉴权：除 `/suzu/health` 外都需要 `Authorization: Bearer <token>`；未配置 token 且未配置白名单时，`/suzu` 接口只接受本机请求（WebUI 有独立的密码会话，仍可远程访问）
 - 来源限制：`allowed_ips` 支持 CIDR 白名单（留空不限制）；`trusted_proxies` 决定哪些地址发来的 `X-Forwarded-For` / `X-Real-IP` 会被采信，防止客户端伪造来源绕过白名单
-- 桌面端默认用 `default_user_id`（默认 `desktop_suzu`）保存个人记忆与好感度；在 WebUI 的 Live2D 标签页填「绑定 QQ 号」后，桌面端改为直接读写该 QQ 账号的个人长期记忆与好感度，和私聊完全一致（只输数字，留空即不绑定）；人设基线直接取 AstrBot 中该 QQ 私聊实际生效的人格（含配置档案与会话级人格覆盖），演化自我设定与情绪状态同样两边共享
+- 桌面端默认用 `default_user_id`（默认 `desktop_suzu`）保存个人记忆与好感度；在 WebUI 的 Live2D 标签页填「绑定 QQ 号」后，桌面端改为直接读写该 QQ 账号的个人长期记忆与好感度，和私聊完全一致（只输数字，留空即不绑定）；人设基线可在 Live2D 标签页选「跟随 AstrBot」（该 QQ 私聊实际生效的人格，含配置档案与会话级覆盖），或直接指定某个人格（如 `FisTohu`）与 AstrBot 人格设定同步；演化自我设定与情绪状态同样两边共享
 - 桌面聊天会复用插件的人设叠加、情绪/好感度与个人记忆注入，并把桌面对话计入人设演化
 
 #### LLM 对 Live2D 的控制范围
