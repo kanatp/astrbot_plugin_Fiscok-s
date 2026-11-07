@@ -285,7 +285,7 @@ class SuzuWebUI:
         category = str(payload.get("category") or "profile")[:40]
         importance = max(1, min(5, int(payload.get("importance") or 3)))
         result = await self.bridge.write_note(
-            self.bridge.default_user_id, text, category, importance
+            self.bridge.memory_user_id, text, category, importance
         )
         if not result.get("ok"):
             return _json(result, status=int(result.get("status") or 502))
@@ -299,7 +299,7 @@ class SuzuWebUI:
             return guard
         payload = await _read_json(request)
         dialogue = str(payload.get("dialogue") or "")[:2000]
-        result = await self.bridge.evolve_now(self.bridge.default_user_id, dialogue)
+        result = await self.bridge.evolve_now(self.bridge.memory_user_id, dialogue)
         if not result.get("ok"):
             return _json(result, status=int(result.get("status") or 502))
         snapshot = await self._snapshot()
@@ -311,7 +311,7 @@ class SuzuWebUI:
     async def _snapshot(self) -> Dict[str, Any]:
         bridge = self.bridge
         plugin = self.plugin
-        user_id = bridge.default_user_id
+        user_id = bridge.memory_user_id
         umo = bridge._umo(user_id)
 
         try:
@@ -391,6 +391,7 @@ class SuzuWebUI:
             },
             "user": {
                 "id": user_id,
+                "boundQQ": bridge.memory_qq,
                 "nickname": bridge.default_nickname,
                 "affinity": affinity,
             },
@@ -619,7 +620,7 @@ class SuzuWebUI:
             return _json({"ok": False, "error": "读取个人记忆失败"}, 500)
         user_id = str(request.query.get("user_id") or "")
         if not user_id:
-            preferred = self.bridge.default_user_id
+            preferred = self.bridge.memory_user_id
             if any(str(item.get("user_id")) == preferred for item in overview):
                 user_id = preferred
             elif overview:
@@ -662,7 +663,7 @@ class SuzuWebUI:
         if guard:
             return guard
         payload = await _read_json(request)
-        user_id = str(payload.get("userId") or self.bridge.default_user_id)
+        user_id = str(payload.get("userId") or self.bridge.memory_user_id)
         memory_id = str(payload.get("id") or "")
         if not memory_id:
             return _json({"ok": False, "error": "缺少记忆 ID"}, 400)
@@ -1024,7 +1025,7 @@ class SuzuWebUI:
             return guard
         payload = await _read_json(request)
         changes: Dict[str, Any] = {}
-        for key in ("token", "llm_provider_id", "default_user_id", "default_nickname"):
+        for key in ("token", "llm_provider_id", "default_user_id", "memory_qq", "default_nickname"):
             if key in payload:
                 changes[key] = payload.get(key)
         if "allowed_ips" in payload:

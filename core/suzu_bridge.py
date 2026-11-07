@@ -127,6 +127,7 @@ class SuzuBridge:
         """把 WebUI 保存的设置应用到运行中的桥接（令牌/白名单立即生效）"""
         self.token = str(data.get("token") or "").strip()
         self.default_user_id = str(data.get("default_user_id") or "desktop_suzu").strip()
+        self.memory_qq = str(data.get("memory_qq") or "").strip()
         self.default_nickname = str(data.get("default_nickname") or "小主人").strip()
         self.llm_provider_id = str(data.get("llm_provider_id") or "").strip()
         self.allowed_networks = _parse_networks(data.get("allowed_ips") or [])
@@ -371,7 +372,14 @@ class SuzuBridge:
     # ---------------- 数据辅助 ----------------
 
     def _user_id(self, supplied: Any = "") -> str:
+        if self.memory_qq:
+            return self.memory_qq
         return _clip(supplied, 80) or self.default_user_id
+
+    @property
+    def memory_user_id(self) -> str:
+        """个人记忆与好感度归属：绑定 QQ 时直接复用该账号，否则用桌面身份。"""
+        return self.memory_qq or self.default_user_id
 
     def _nickname(self, supplied: Any = "") -> str:
         return _clip(supplied, 40) or self.default_nickname
@@ -494,6 +502,7 @@ class SuzuBridge:
                 "now": _iso_now(),
                 "user": {
                     "id": user_id,
+                    "boundQQ": self.memory_qq,
                     "nickname": nickname,
                     "affinity": affinity,
                 },

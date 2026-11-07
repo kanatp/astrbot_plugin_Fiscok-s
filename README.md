@@ -154,7 +154,7 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 - `proactive_chat_config`：主动发起聊天开关、生成辅助 LLM、冷场下限/上限（分钟）、安静时段、开口概率、每日上限、发言冷却、参考消息条数与截断、单条字符上限、群聊白名单；另有私聊主动开关、私聊用户白名单（QQ 号，留空为全部）、私聊冷场下限/上限与私聊每日上限。
 - `context_optimize_config`：上下文精简开关、保留最近消息条数、上下文总字符上限（默认关闭）。
 - `persona_evolution_config`：人设演化开关、演化辅助 LLM、每多少条回复尝试演化、参考对话条数与单条截断、自我设定最大字符数（默认关闭）。
-- `suzu_bridge_config`：Live2D 桌面端与 WebUI 的启用开关、监听地址（默认 `127.0.0.1` 仅本机）与端口；令牌、白名单、桌面聊天 Provider、桌面身份与表情映射等其余设置全部放在 WebUI 的 Live2D 标签页。
+- `suzu_bridge_config`：Live2D 桌面端与 WebUI 的启用开关、监听地址（默认 `127.0.0.1` 仅本机）与端口；令牌、白名单、桌面聊天 Provider、绑定 QQ、桌面身份与表情映射等其余设置全部放在 WebUI 的 Live2D 标签页。
 
 ## 桌面端桥接（Live2D 模型）
 
@@ -163,7 +163,7 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 - 接口：`GET /suzu/health`、`GET /suzu/bootstrap`、`POST /suzu/chat`、`GET /suzu/memory`、`POST /suzu/memory/note`、`POST /suzu/persona/evolve`
 - 鉴权：除 `/suzu/health` 外都需要 `Authorization: Bearer <token>`；未配置 token 且未配置白名单时，`/suzu` 接口只接受本机请求（WebUI 有独立的密码会话，仍可远程访问）
 - 来源限制：`allowed_ips` 支持 CIDR 白名单（留空不限制）；`trusted_proxies` 决定哪些地址发来的 `X-Forwarded-For` / `X-Real-IP` 会被采信，防止客户端伪造来源绕过白名单
-- 桌面端使用独立的 `default_user_id`（默认 `desktop_suzu`）保存个人记忆与好感度，与 QQ 用户互不覆盖；人设基线、演化自我设定与情绪状态则是两边共享的
+- 桌面端默认用 `default_user_id`（默认 `desktop_suzu`）保存个人记忆与好感度；在 WebUI 的 Live2D 标签页填「绑定 QQ 号」后，桌面端改为直接读写该 QQ 账号的个人长期记忆与好感度，和私聊完全一致（只输数字，留空即不绑定）；人设基线、演化自我设定与情绪状态始终两边共享
 - 桌面聊天会复用插件的人设叠加、情绪/好感度与个人记忆注入，并把桌面对话计入人设演化
 
 #### LLM 对 Live2D 的控制范围

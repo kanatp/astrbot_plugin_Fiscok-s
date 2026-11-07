@@ -651,7 +651,12 @@
               <input id="l2d-nickname" type="text" maxlength="40" />
             </div>
             <div class="field">
-              <label for="l2d-user">桌面端记忆身份 ID</label>
+              <label for="l2d-memory-qq">绑定 QQ 号（共用个人长期记忆）</label>
+              <input id="l2d-memory-qq" type="text" maxlength="20" inputmode="numeric" placeholder="例如 123456789，留空则不绑定" />
+              <div class="hint">填写后桌面端直接使用该 QQ 的个人记忆与好感度，和私聊完全一致。</div>
+            </div>
+            <div class="field">
+              <label for="l2d-user">桌面端记忆身份 ID（未绑定 QQ 时使用）</label>
               <input id="l2d-user" type="text" maxlength="80" />
             </div>
             <div class="field">
@@ -662,7 +667,7 @@
               <label for="l2d-trusted">可信反向代理（每行一个）</label>
               <textarea id="l2d-trusted" placeholder="同机 nginx 保持 127.0.0.1 / ::1"></textarea>
             </div>
-            <div class="field wide">
+            <div class="field">
               <label for="l2d-map">情绪 → 表情 / 动作映射</label>
               <textarea id="l2d-map" placeholder="开心,高兴 = smile / tap_head"></textarea>
               <div class="hint">每行格式：关键词1,关键词2 = 表情 / 动作（动作可省略）。关键词匹配当前情绪文字；留空则全部使用客户端默认。</div>
@@ -961,7 +966,9 @@
         ])
         $('persona-evolved').textContent = persona.evolved || '还没有演化自我设定。'
         $('badge-memory').textContent = (memory.count || 0) + ' 条'
-        $('memory-hint').textContent = '桌面端身份：' + (user.id || '-') + ' · ' + (user.nickname || '-')
+        $('memory-hint').textContent = user.boundQQ
+          ? '已绑定 QQ ' + user.boundQQ + '，与私聊共用个人记忆与好感度'
+          : '桌面端身份：' + (user.id || '-') + ' · ' + (user.nickname || '-')
 
         const items = memory.items || []
         $('memory-list').innerHTML = items.length
@@ -1060,6 +1067,7 @@
         }
         providerSelect.value = providerId
         $('l2d-nickname').value = settings.default_nickname || ''
+        $('l2d-memory-qq').value = settings.memory_qq || ''
         $('l2d-user').value = settings.default_user_id || ''
         $('l2d-allowed').value = (settings.allowed_ips || []).join('\n')
         $('l2d-trusted').value = (settings.trusted_proxies || []).join('\n')
@@ -1074,6 +1082,7 @@
             token: $('l2d-token').value.trim(),
             llm_provider_id: $('l2d-provider').value,
             default_nickname: $('l2d-nickname').value.trim(),
+            memory_qq: $('l2d-memory-qq').value.trim(),
             default_user_id: $('l2d-user').value.trim(),
             allowed_ips: linesToArray($('l2d-allowed').value),
             trusted_proxies: linesToArray($('l2d-trusted').value),
