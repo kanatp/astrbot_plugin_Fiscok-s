@@ -256,6 +256,19 @@ server {
 
 `allowed_ips`、`trusted_proxies` 与访问令牌改到 WebUI 的 Live2D 标签页里配置。`allowed_ips` 在反代模式下只需填代理自身的地址（同机即 `127.0.0.1`），真实客户端地址由 nginx 的 `X-Forwarded-For` 传入；nginx 的 `allow/deny` 才是面向公网的客户 IP 白名单。桌面端 Console 的地址填 `https://suzu.example.com/suzu`，令牌与 WebUI 里保存的一致。
 
+#### 公网访问排查（502 / 连接失败）
+
+`502 Bad Gateway` 不是本插件返回的，它来自前面的 nginx、宝塔、frp 或其他反向代理，表示代理连不上插件。按顺序排查：
+
+1. **确认插件真的在监听**：在服务器本机执行 `curl -i http://127.0.0.1:721/`（换成实际端口），WebUI 首页应返回 HTML；`netstat -ano | findstr :721`（Windows）或 `ss -lntp | grep 721`（Linux）应看到监听进程。
+2. **看 AstrBot 日志里的 `[Fiscok's][suzu]`**：只有「正在监听 … / 桌面桥接已启动」才说明端口成功绑定；出现「端口启动失败」时按提示处理：
+   - Linux/Unix 下低于 1024 的端口需要 root 权限，建议改用 1024 以上的端口；
+   - 端口被其他程序占用（包括面板/nginx 已经占用了该端口）；
+   - Docker 部署必须在 `docker run -p 宿主机端口:容器端口` 或 compose 的 `ports` 里映射，容器内监听不等于宿主机可达。
+3. **使用 frp / 内网穿透时**：frpc 的 `local_ip` 填 `127.0.0.1`、`local_port` 与插件端口一致；frpc 没连上或本地端口没开时，frps 就会返回 502。
+4. **确认改端口后已生效**：修改 `suzu_bridge_config` 保存后 AstrBot 会热重载插件；若日志仍显示旧端口，重载一次插件或重启 AstrBot。
+5. 防火墙为黑名单/全放行时不需要额外开端口；若开了系统防火墙或云厂商安全组，仍需放行该端口。
+
 ## 版本说明
 
 ### v2.3

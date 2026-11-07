@@ -213,12 +213,31 @@ class SuzuBridge:
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self.host, self.port, shutdown_timeout=1)
+        logger.info(f"[Fiscok's][suzu] 正在监听 {self.host}:{self.port} ...")
         try:
             await self._site.start()
-        except OSError as exc:
+        except PermissionError as exc:
             logger.error(
-                f"[Fiscok's][suzu] 端口 {self.port} 启动失败：{exc}。"
-                "请修改 suzu_bridge_config.port 或关闭占用该端口的程序。"
+                f"[Fiscok's][suzu] 端口 {self.port} 绑定失败（无权限）：{exc}。"
+                "Linux/Unix 下低于 1024 的端口需要 root 或 CAP_NET_BIND_SERVICE，"
+                "建议改用 1024 以上的端口；Docker 部署还需要在容器映射该端口。"
+            )
+            await self._runner.cleanup()
+            self._runner = None
+            self._site = None
+            return
+        except OSError as exc:
+            errno = getattr(exc, "errno", None)
+            if errno in (48, 98, 10048):
+                reason = "端口已被其他程序占用"
+            elif errno in (99, 10049):
+                reason = "监听地址不可用（该地址不属于本机网卡）"
+            else:
+                reason = "端口无法绑定"
+            logger.error(
+                f"[Fiscok's][suzu] 端口 {self.port} 启动失败（{reason}）：{exc}。"
+                "请修改 suzu_bridge_config.port 或关闭占用该端口的程序；"
+                "若使用 Docker，请确认宿主机端口已映射到容器内同一端口。"
             )
             await self._runner.cleanup()
             self._runner = None
@@ -232,6 +251,11 @@ class SuzuBridge:
         )
         logger.info(f"[Fiscok's][suzu] WebUI 地址: http://{self.host}:{self.port}/ "
                     f"(密码见本机日志或插件数据目录 suzu_webui.json)")
+        if self.host == "0.0.0.0":
+            logger.info(
+                "[Fiscok's][suzu] 已监听所有网卡；公网能否访问还取决于云安全组、"
+                "Docker 端口映射与前置反向代理（502 通常是代理连不上该端口）"
+            )
 
     async def stop(self) -> None:
         if not self._started:

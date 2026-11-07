@@ -620,7 +620,7 @@
         "description": "监听端口",
         "type": "int",
         "default": 6199,
-        "hint": "WebUI 与桌面桥接共用该端口；修改后需重载插件或在 WebUI 点「重启服务」"
+        "hint": "WebUI 与桌面桥接共用该端口，建议使用 1024 以上的端口（Linux 下低于 1024 需要 root 权限）；修改后需重载插件或在 WebUI 点「重启服务」"
       }
     }
   }
