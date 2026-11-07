@@ -154,6 +154,96 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 - `proactive_chat_config`：主动发起聊天开关、生成辅助 LLM、冷场下限/上限（分钟）、安静时段、开口概率、每日上限、发言冷却、参考消息条数与截断、单条字符上限、群聊白名单；另有私聊主动开关、私聊用户白名单（QQ 号，留空为全部）、私聊冷场下限/上限与私聊每日上限。
 - `context_optimize_config`：上下文精简开关、保留最近消息条数、上下文总字符上限（默认关闭）。
 - `persona_evolution_config`：人设演化开关、演化辅助 LLM、每多少条回复尝试演化、参考对话条数与单条截断、自我设定最大字符数（默认关闭）。
+- `suzu_bridge_config`：桌面端桥接开关、监听地址 / 端口、访问令牌、桌面聊天 Provider、桌面端专属记忆身份与称呼（默认关闭）。
+
+## 桌面端桥接（Live2D 模型）
+
+开启 `suzu_bridge_config.available` 后，插件会额外启动一个独立的 aiohttp 服务（与 AstrBot 面板端口无关），供桌面端模型读取人设、记忆并把聊天交给同一个模型：
+
+- 接口：`GET /suzu/health`、`GET /suzu/bootstrap`、`POST /suzu/chat`、`GET /suzu/memory`、`POST /suzu/memory/note`、`POST /suzu/persona/evolve`
+- 鉴权：除 `/suzu/health` 外都需要 `Authorization: Bearer <token>`；未配置 token 且未配置白名单时服务会被强制限制在 `127.0.0.1`
+- 来源限制：`allowed_ips` 支持 CIDR 白名单（留空不限制）；`trusted_proxies` 决定哪些地址发来的 `X-Forwarded-For` / `X-Real-IP` 会被采信，防止客户端伪造来源绕过白名单
+- 桌面端使用独立的 `default_user_id`（默认 `desktop_suzu`）保存个人记忆与好感度，与 QQ 用户互不覆盖；人设基线、演化自我设定与情绪状态则是两边共享的
+- 桌面聊天会复用插件的人设叠加、情绪/好感度与个人记忆注入，并把桌面对话计入人设演化
+
+#### LLM 对 Live2D 的控制范围
+
+插件侧 LLM 只产出文本与状态，不直接编排动作。`POST /suzu/chat` 返回：
+
+```json
+{ "reply": "...", "emotion": "开心", "affinity": 62 }
+```
+
+桌面端 `Kira Live` 主进程拿到后，目前只做粗略映射：`emotion` 含「难过 / 低落」时播放 `sad` 表情，其余播放 `smile`，并固定附带 `yesNod` 动作。也就是说，LLM 能影响「看起来高兴还是低落」，但不能选择具体动作或姿态。
+
+本地规则 Brain（MockBrain）在 AstrBot 不可用或请求失败时才接管，它能给出更细的 `expression / motions / pose`，但这不是 LLM 输出。若要让 LLM 精确控制 Live2D，需要把桥接返回扩展为结构化的 `expression`、`motions`、`pose`，并在桌面端用模型能力白名单校验后再播放。
+
+### Fiscok_webui（类 NapCat 登录）
+
+桥接服务同时提供 `Fiscok_webui`（密码登录的插件管理面板），与 `/suzu` 共用监听端口：
+
+- 访问 `http://<插件地址>:6199/`，用随机生成的本机密码登录
+- 首次启动随机生成 10 位密码，写入插件数据目录 `suzu_webui.json`，并打印在 AstrBot 本机日志（与 NapCat 在控制台打印 token 一致）
+- 页面可查看桥接状态、IP 白名单、桌面端最近连接 / 聊天时间，以及人设、情绪、好感度与个人记忆；支持手动「演化一次」和写入记忆
+- 表情包库：缩略图预览、关键字搜索、按标签 / 情绪筛选，可编辑描述、标签与情绪，支持单条删除与清空
+- 话题记忆：按会话切换，可修改记忆内容与重要度，支持单条删除与清空当前会话
+- 私聊记忆：按用户切换，可修改记忆内容与重要度，支持单条删除与清空该用户
+- 情绪与好感度：直接修改全局情绪文字（可选同时写为默认情绪），查看并调整每个用户的好感度、恢复默认值
+- 插件配置：在线修改表情包、话题记忆、个人记忆、情绪与好感度、人设演化的开关和阈值，保存后写入 AstrBot 插件配置
+- 会话使用 HttpOnly + SameSite=Strict 的签名 Cookie，12 小时过期；登录失败 5 次后封禁 10 分钟
+- 桌面端 Kira Live 控制台的「AstrBot → 插件 WebUI」按钮会直接打开这个页面；桥接地址与令牌也可在页面里复制
+
+### 反向代理 + IP 白名单
+
+云端部署不要把 6199 直接暴露到公网。推荐让插件监听 `127.0.0.1`，由同机 nginx 负责 TLS、白名单与限流：
+
+```nginx
+# /etc/nginx/conf.d/suzu.conf
+limit_req_zone $binary_remote_addr zone=suzu:10m rate=6r/m;
+
+server {
+    listen 443 ssl http2;
+    server_name suzu.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/suzu.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/suzu.example.com/privkey.pem;
+
+    # 只允许家里/公司等固定出口访问；动态家宽请配合 DDNS 或收紧到运营商网段
+    allow 203.0.113.7;
+    allow 2001:db8::/32;
+    deny all;
+
+    # `/` 是插件 WebUI，`/suzu/` 是桌面桥接，同一端口一起转发
+    location / {
+        limit_req zone=suzu burst=6 nodelay;
+
+        proxy_pass http://127.0.0.1:6199;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # 令牌由桌面端自带，这里只透传，不要写进配置
+        proxy_set_header Authorization $http_authorization;
+        proxy_read_timeout 90s;
+    }
+}
+```
+
+配套的插件配置：
+
+```json
+"suzu_bridge_config": {
+  "available": true,
+  "host": "127.0.0.1",
+  "port": 6199,
+  "token": "至少 32 位随机字符串",
+  "allowed_ips": ["127.0.0.1"],
+  "trusted_proxies": ["127.0.0.1", "::1"]
+}
+```
+
+`allowed_ips` 在反代模式下只需填代理自身的地址（同机即 `127.0.0.1`），真实客户端地址由 nginx 的 `X-Forwarded-For` 传入；nginx 的 `allow/deny` 才是面向公网的客户 IP 白名单。桌面端 Console 的地址填 `https://suzu.example.com/suzu`，令牌与插件里保持一致。
 
 ## 版本说明
 

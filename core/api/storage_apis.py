@@ -668,6 +668,68 @@ class DataManager:
         """获取当前表情包库中的表情包数量"""
         return len(self._load_meme_db())
 
+    def get_memes(self) -> List[Dict]:
+        """获取全部表情包记录（按时间倒序）"""
+        db = self._load_meme_db()
+        return sorted(db, key=lambda item: str(item.get('timestamp', '')), reverse=True)
+
+    def update_meme(
+        self,
+        meme_id: str,
+        description: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        emotion: Optional[str] = None,
+    ) -> bool:
+        """更新表情包的描述 / 标签 / 情绪，未找到返回 False"""
+        try:
+            db = self._load_meme_db()
+            for item in db:
+                if item.get('id') != meme_id:
+                    continue
+                if description is not None:
+                    item['description'] = description
+                if tags is not None:
+                    item['tags'] = tags
+                if emotion is not None:
+                    item['emotion'] = emotion
+                item['updated_at'] = datetime.now().isoformat()
+                self._save_meme_db(db)
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[DataManager][update_meme]更新表情包失败: {e}", exc_info=True)
+            return False
+
+    def delete_meme(self, meme_id: str) -> bool:
+        """删除一条表情包记录及其图片文件，未找到返回 False"""
+        try:
+            db = self._load_meme_db()
+            target = next((item for item in db if item.get('id') == meme_id), None)
+            if not target:
+                return False
+            path = self.meme_library_root / str(target.get('filename', ''))
+            if path.exists():
+                path.unlink()
+            self._save_meme_db([item for item in db if item.get('id') != meme_id])
+            return True
+        except Exception as e:
+            logger.error(f"[DataManager][delete_meme]删除表情包失败: {e}", exc_info=True)
+            return False
+
+    def clear_memes(self) -> int:
+        """清空表情包库并删除图片文件，返回清理的条数"""
+        try:
+            db = self._load_meme_db()
+            for item in db:
+                path = self.meme_library_root / str(item.get('filename', ''))
+                if path.exists():
+                    path.unlink()
+            self._save_meme_db([])
+            return len(db)
+        except Exception as e:
+            logger.error(f"[DataManager][clear_memes]清空表情包失败: {e}", exc_info=True)
+            return 0
+
     # --- 好感度/情绪存储基础组件 ---
     def _get_affinity_file(self) -> Path:
         """获取好感度/情绪数据库的 JSON 文件路径"""
@@ -765,6 +827,53 @@ class DataManager:
             return {"affinity": record["affinity"]}
         except Exception as e:
             logger.error(f"[DataManager] 更新用户好感度失败: {e}", exc_info=True)
+            return {"affinity": int(self.config.get('emotion_config', {}).get('affinity_init', 50))}
+
+    def get_affinity_overview(self) -> List[Dict]:
+        """列出所有已记录的好感度"""
+        overview = []
+        try:
+            db = self._load_affinity_db()
+            for user_id, record in db.items():
+                if not isinstance(record, dict):
+                    continue
+                overview.append({
+                    "user_id": str(user_id),
+                    "nickname": str(record.get("nickname") or ""),
+                    "affinity": int(record.get("affinity", 50)),
+                    "last_update": str(record.get("last_update") or ""),
+                })
+            overview.sort(key=lambda item: item.get("affinity", 0), reverse=True)
+        except Exception as e:
+            logger.error(f"[DataManager] 读取好感度列表失败: {e}", exc_info=True)
+        return overview
+
+    def set_user_affinity(
+        self,
+        user_id: str,
+        affinity: int,
+        nickname: str = "",
+        min_: int = 0,
+        max_: int = 100,
+    ) -> Dict:
+        """直接把某个用户的好感度设置为指定值"""
+        try:
+            db = self._load_affinity_db()
+            record = db.get(user_id)
+            if not record:
+                record = self._init_affinity_record(user_id, nickname)
+            elif nickname:
+                record["nickname"] = nickname
+            record["affinity"] = max(min_, min(max_, int(affinity)))
+            record["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            db[user_id] = record
+            self._save_affinity_db(db)
+            logger.info(
+                f"[DataManager] 设置用户 {user_id} 好感度: affinity={record['affinity']}"
+            )
+            return {"affinity": record["affinity"]}
+        except Exception as e:
+            logger.error(f"[DataManager] 设置用户好感度失败: {e}", exc_info=True)
             return {"affinity": int(self.config.get('emotion_config', {}).get('affinity_init', 50))}
 
     # --- Instagram 订阅管理基础组件 ---
@@ -1237,6 +1346,29 @@ class DataManager:
         self._save_topic_db(kept)
         logger.info(f"[DataManager][clear_topics]已清空会话话题记忆: {scope}")
 
+    def get_all_topics(self) -> List[Dict]:
+        """获取全部会话的话题记忆"""
+        return self._load_topic_db()
+
+    def get_topic_overview(self) -> List[Dict]:
+        """按会话汇总话题记忆条数与最近更新时间"""
+        grouped: Dict[str, List[Dict]] = {}
+        for item in self._load_topic_db():
+            grouped.setdefault(str(item.get('scope', '')), []).append(item)
+        overview = []
+        for scope, items in grouped.items():
+            latest = max(
+                (str(item.get('updated_at') or item.get('timestamp') or '') for item in items),
+                default='',
+            )
+            overview.append({
+                "scope": scope,
+                "count": len(items),
+                "updated_at": latest,
+            })
+        overview.sort(key=lambda item: item.get('updated_at', ''), reverse=True)
+        return overview
+
     # --- 个人长期记忆（私聊，按用户分文件）存储 ---
     def _get_personal_memory_file(self, user_id: str) -> Path:
         """获取某个用户的个人记忆文件路径"""
@@ -1361,6 +1493,28 @@ class DataManager:
         """清空某个用户的个人记忆"""
         self._save_personal_memories(user_id, [])
         logger.info(f"[DataManager][clear_personal_memories]已清空个人记忆: user={user_id}")
+
+    def get_personal_memory_overview(self) -> List[Dict]:
+        """列出有个人记忆的用户及条数、最近更新时间"""
+        overview = []
+        if not self.personal_memory_root.exists():
+            return overview
+        for file in sorted(self.personal_memory_root.glob('*.json')):
+            user_id = file.stem
+            memories = self.get_personal_memories(user_id)
+            if not memories:
+                continue
+            latest = max(
+                (str(item.get('updated_at') or item.get('created_at') or '') for item in memories),
+                default='',
+            )
+            overview.append({
+                "user_id": user_id,
+                "count": len(memories),
+                "updated_at": latest,
+            })
+        overview.sort(key=lambda item: item.get('updated_at', ''), reverse=True)
+        return overview
 
     # --- 人设演化（自我设定）存储 ---
     def _get_persona_file(self) -> Path:

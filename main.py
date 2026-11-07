@@ -167,6 +167,10 @@ class Core(Star):
         # 启动定时任务
         self.timer.start()
 
+        # 小铃桌面端桥接（可选，配置 suzu_bridge_config 后启用）
+        self.suzu_bridge = None
+        self._init_suzu_bridge(config)
+
         # 主动发起聊天：周期性检查冷场群聊
         self._spawn_background(self._proactive_loop())
 
@@ -1356,6 +1360,18 @@ class Core(Star):
         task.add_done_callback(self._background_tasks.discard)
         return task
 
+    def _init_suzu_bridge(self, config: Dict):
+        """按配置启动小铃桌面端 HTTP 桥接（未启用时完全不影响插件）"""
+        bridge_cfg = config.get('suzu_bridge_config', {}) or {}
+        if not bridge_cfg.get('available', False):
+            return
+        try:
+            from .core.suzu_bridge import SuzuBridge
+            self.suzu_bridge = SuzuBridge(self, bridge_cfg)
+            self._spawn_background(self.suzu_bridge.start())
+        except Exception as e:
+            logger.warning(f"[Fiscok's][suzu] 桌面桥接初始化失败: {e}")
+
     def _extract_emoji_urls(self, event: AstrMessageEvent) -> List[str]:
         """
         从消息中提取表情包（sub_type == 1 的图片）地址（同步执行）
@@ -2399,6 +2415,14 @@ class Core(Star):
         self._merge_pending.clear()
         self._personal_memory_counters.clear()
         self._persona_recent.clear()
+
+        if getattr(self, 'suzu_bridge', None):
+            try:
+                await self.suzu_bridge.stop()
+            except Exception as e:
+                logger.warning(f"[Fiscok's][suzu] 停止桌面桥接失败: {e}")
+            self.suzu_bridge = None
+
         await close_aux_providers()
 
         self.data_manager = None

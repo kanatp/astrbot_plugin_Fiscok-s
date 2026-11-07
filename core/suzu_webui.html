@@ -1,0 +1,1536 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fiscok_webui</title>
+    <style>
+      :root {
+        --bg: #fbf7fd;
+        --card: #ffffff;
+        --line: #f0e7f6;
+        --text: #4a4360;
+        --muted: #9a90ad;
+        --pink: #ff9fc4;
+        --pink-deep: #ef77a6;
+        --lav: #b3a4f7;
+        --mint: #8fdfc9;
+        --sun: #ffd08a;
+        --danger: #e56a86;
+        --shadow: 0 10px 30px rgba(180, 150, 200, 0.14);
+        --shadow-soft: 0 4px 14px rgba(180, 150, 200, 0.1);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          radial-gradient(900px 500px at 8% -6%, #fff0f7 0%, transparent 60%),
+          radial-gradient(800px 520px at 100% 0%, #f0ebff 0%, transparent 55%),
+          var(--bg);
+        color: var(--text);
+        font-family: 'PingFang SC', 'Microsoft YaHei UI', 'Segoe UI', system-ui, sans-serif;
+        font-size: 13.5px;
+      }
+      button, input, select, textarea { font: inherit; color: inherit; }
+      [hidden] { display: none !important; }
+
+      /* ---------- 登录 ---------- */
+      .login-wrap {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+      .login-card {
+        width: min(380px, 100%);
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        padding: 28px 26px 24px;
+        box-shadow: var(--shadow);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .brand-mark {
+        width: 42px;
+        height: 42px;
+        flex: none;
+        border-radius: 15px;
+        background: linear-gradient(135deg, var(--pink) 0%, var(--lav) 100%);
+        box-shadow: 0 6px 16px rgba(239, 119, 166, 0.28);
+        display: grid;
+        place-items: center;
+        color: #fff;
+        font-weight: 700;
+        font-size: 18px;
+      }
+      .brand-name { font-size: 16px; font-weight: 700; }
+      .brand-sub { margin-top: 2px; font-size: 11px; color: var(--muted); letter-spacing: 0.3px; }
+      .field { margin-top: 18px; }
+      .field label { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 6px; }
+      .field input {
+        width: 100%;
+        padding: 11px 14px;
+        border-radius: 13px;
+        border: 1px solid var(--line);
+        background: #fcfaff;
+        outline: none;
+        transition: border-color 0.16s ease, box-shadow 0.16s ease;
+      }
+      .field input:focus {
+        border-color: #ffc9dd;
+        box-shadow: 0 0 0 3px rgba(255, 159, 196, 0.2);
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 10px 16px;
+        border: none;
+        border-radius: 13px;
+        background: linear-gradient(135deg, var(--pink) 0%, var(--lav) 100%);
+        color: #fff;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: 0 7px 18px rgba(239, 119, 166, 0.26);
+        transition: transform 0.08s ease, filter 0.16s ease;
+      }
+      .btn:hover { filter: brightness(1.04); }
+      .btn:active { transform: translateY(1px); }
+      .btn:disabled { opacity: 0.55; cursor: default; box-shadow: none; }
+      .btn-ghost {
+        background: #fff;
+        color: var(--pink-deep);
+        border: 1px solid #ffe0ee;
+        box-shadow: var(--shadow-soft);
+        font-weight: 500;
+      }
+      .btn-wide { width: 100%; margin-top: 20px; }
+      .login-error { margin-top: 12px; color: var(--danger); font-size: 12px; min-height: 18px; }
+      .login-hint { margin-top: 14px; color: var(--muted); font-size: 11.5px; line-height: 1.7; }
+
+      /* ---------- 主界面 ---------- */
+      .app { max-width: 1080px; margin: 0 auto; padding: 26px 24px 44px; }
+      .topbar {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 20px;
+      }
+      .topbar h1 { margin: 0; font-size: 21px; letter-spacing: 0.4px; }
+      .topbar p { margin: 5px 0 0; color: var(--muted); font-size: 12.5px; }
+      .pills { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        background: #fff;
+        border: 1px solid var(--line);
+        box-shadow: var(--shadow-soft);
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .dot { width: 7px; height: 7px; border-radius: 50%; background: #d6cfe2; flex: none; }
+      .pill.on { color: #3f9c81; border-color: #cbece0; background: #f4fffb; }
+      .pill.on .dot { background: var(--mint); box-shadow: 0 0 0 3px rgba(143, 223, 201, 0.25); }
+      .pill.warn { color: #c48a3a; border-color: #f5e3c4; background: #fffaf1; }
+      .pill.warn .dot { background: var(--sun); box-shadow: 0 0 0 3px rgba(255, 208, 138, 0.25); }
+
+      .grid { display: grid; gap: 16px; grid-template-columns: repeat(12, minmax(0, 1fr)); }
+      .col-4 { grid-column: span 4; }
+      .col-6 { grid-column: span 6; }
+      .col-8 { grid-column: span 8; }
+      .col-12 { grid-column: span 12; }
+      @media (max-width: 860px) {
+        .col-4, .col-6, .col-8 { grid-column: span 12; }
+      }
+      .card {
+        min-width: 0;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        padding: 20px 20px 18px;
+        box-shadow: var(--shadow);
+      }
+      .card-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+      .card-head h2 { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: 0.3px; }
+      .card-head .hint { margin: 4px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.6; }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 9px;
+        border-radius: 999px;
+        background: #fff2f8;
+        border: 1px solid #ffe0ee;
+        color: var(--pink-deep);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      .badge.lav { background: #f4f0ff; border-color: #e6ddff; color: #7f6fd8; }
+      .badge.mint { background: #f0fffa; border-color: #d5f4ea; color: #3f9c81; }
+      .badge.sun { background: #fff8ec; border-color: #ffe9c2; color: #b9822f; }
+
+      .kv { display: grid; gap: 9px; }
+      .kv-row { display: flex; justify-content: space-between; gap: 16px; font-size: 12.5px; }
+      .kv-row .k { color: var(--muted); flex: none; }
+      .kv-row .v { text-align: right; word-break: break-all; }
+
+      .mono {
+        font-family: 'Cascadia Mono', 'Consolas', monospace;
+        font-size: 12px;
+      }
+      .copy-box {
+        position: relative;
+        margin-top: 10px;
+        padding: 12px 46px 12px 14px;
+        border-radius: 14px;
+        border: 1px dashed #e6dcf2;
+        background: #fcfaff;
+        color: var(--text);
+        word-break: break-all;
+      }
+      .copy-box .mono { user-select: all; }
+      .copy-btn {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        padding: 5px 9px;
+        border-radius: 10px;
+        border: 1px solid #ffe0ee;
+        background: #fff;
+        color: var(--pink-deep);
+        font-size: 11px;
+        cursor: pointer;
+      }
+      .chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+      .chip {
+        padding: 6px 11px;
+        border-radius: 12px;
+        border: 1px solid #eee4f4;
+        background: #fcfaff;
+        color: var(--muted);
+        font-size: 11.5px;
+      }
+
+      .persona-text {
+        margin-top: 10px;
+        padding: 12px 14px;
+        border-radius: 14px;
+        border: 1px solid var(--line);
+        background: #fcfaff;
+        font-size: 12.5px;
+        line-height: 1.7;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 180px;
+        overflow: auto;
+      }
+      .empty { color: var(--muted); font-size: 12px; }
+
+      .memory-list { display: grid; gap: 9px; max-height: 320px; overflow: auto; }
+      .memory-item {
+        padding: 11px 13px;
+        border-radius: 14px;
+        border: 1px solid var(--line);
+        background: linear-gradient(180deg, #fcf9ff 0%, #f8f4fd 100%);
+      }
+      .memory-item .meta {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        color: var(--muted);
+        font-size: 11px;
+        margin-bottom: 5px;
+      }
+      .memory-item .body { font-size: 12.5px; line-height: 1.65; word-break: break-word; }
+
+      .note-form { display: grid; gap: 10px; margin-top: 14px; }
+      .note-form .row { display: flex; gap: 10px; }
+      .note-form select, .note-form textarea {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid var(--line);
+        background: #fcfaff;
+        outline: none;
+      }
+      .note-form textarea { min-height: 64px; resize: vertical; }
+      .note-form .row select { flex: 1; }
+      .note-form .row select:last-child { max-width: 120px; }
+
+      .msg {
+        margin-top: 12px;
+        font-size: 12px;
+        color: var(--muted);
+        min-height: 16px;
+      }
+      .msg.error { color: var(--danger); }
+      .msg.ok { color: #3f9c81; }
+
+      .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+      .toolbar select, .toolbar input {
+        padding: 9px 11px;
+        border-radius: 12px;
+        border: 1px solid var(--line);
+        background: #fcfaff;
+        outline: none;
+        min-width: 0;
+      }
+      .toolbar input { flex: 1; }
+      .mini-btn {
+        padding: 5px 10px;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--muted);
+        font-size: 11.5px;
+        cursor: pointer;
+      }
+      .mini-btn:hover { color: var(--text); background: #fcfaff; }
+      .meme-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 12px;
+        max-height: 440px;
+        overflow: auto;
+      }
+      .meme-card {
+        display: flex;
+        flex-direction: column;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #fcfaff;
+        overflow: hidden;
+      }
+      .meme-card img {
+        display: block;
+        width: 100%;
+        aspect-ratio: 1 / 1;
+        object-fit: cover;
+        background: #f5efff;
+      }
+      .meme-body { display: grid; gap: 6px; padding: 9px 10px 10px; }
+      .meme-desc { min-height: 18px; font-size: 12px; line-height: 1.45; word-break: break-word; }
+      .meme-meta { display: flex; justify-content: space-between; gap: 6px; color: var(--muted); font-size: 11px; }
+      .tag-row { display: flex; flex-wrap: wrap; gap: 6px; }
+      .tag-chip {
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: #f4f0ff;
+        border: 1px solid #e6ddff;
+        color: #7f6fd8;
+        font-size: 11px;
+      }
+      .meme-actions { display: flex; gap: 6px; }
+      .memory-item .actions { display: flex; gap: 6px; margin-top: 7px; }
+      .mini-btn.danger { color: #c95b83; border-color: #f6cfdd; background: #fff8fb; }
+      .mini-btn.danger:hover { color: #b03c68; background: #fff1f6; }
+      .head-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+      .config-sections {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+        max-height: 540px;
+        overflow: auto;
+      }
+      .config-section {
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #fcfaff;
+      }
+      .config-section h3 { margin: 0 0 10px; font-size: 13px; }
+      .config-field { display: grid; gap: 5px; margin-bottom: 11px; }
+      .config-field .cf-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: center;
+        font-size: 12px;
+      }
+      .config-field .desc { color: var(--muted); font-size: 11px; line-height: 1.5; }
+      .config-field input[type='text'], .config-field input[type='number'] {
+        width: 100%;
+        padding: 8px 10px;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: #fff;
+        outline: none;
+      }
+      .config-field input[type='checkbox'] { width: 16px; height: 16px; accent-color: var(--pink-deep); }
+      .emotion-panels {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+        margin-bottom: 14px;
+      }
+      .emotion-panel {
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #fcfaff;
+      }
+      .emotion-panel h3 { margin: 0 0 9px; font-size: 13px; }
+      .emotion-panel .field { margin-top: 0; }
+      .emotion-panel .field + .field { margin-top: 10px; }
+      .emotion-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+      .emotion-actions label { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); }
+      .emotion-range { margin-top: 8px; color: var(--muted); font-size: 11.5px; line-height: 1.6; }
+      .affinity-list { display: grid; gap: 8px; max-height: 320px; overflow: auto; }
+      .affinity-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 9px 12px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #fcfaff;
+        flex-wrap: wrap;
+      }
+      .affinity-row .who { display: grid; gap: 2px; min-width: 0; }
+      .affinity-row .name { font-size: 12.5px; font-weight: 600; }
+      .affinity-row .sub { color: var(--muted); font-size: 11px; word-break: break-all; }
+      .affinity-row .val { color: var(--pink-deep); font-weight: 700; font-size: 15px; }
+      .affinity-row .actions { display: flex; gap: 6px; }
+
+      .foot {
+        margin-top: 22px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 11.5px;
+        line-height: 1.8;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="login" class="login-wrap">
+      <div class="login-card">
+        <div class="brand">
+          <div class="brand-mark">F</div>
+          <div>
+            <div class="brand-name">Fiscok_webui</div>
+            <div class="brand-sub">插件管理面板</div>
+          </div>
+        </div>
+        <div class="field">
+          <label for="password">访问密码</label>
+          <input id="password" type="password" autocomplete="current-password" placeholder="插件启动时打印在本机日志里" />
+        </div>
+        <button id="btn-login" class="btn btn-wide" type="button">登录</button>
+        <div id="login-error" class="login-error"></div>
+        <div class="login-hint">
+          访问密码只在 AstrBot 本机日志与插件数据目录可见，等同于 NapCat 的 WebUI token。
+        </div>
+      </div>
+    </div>
+
+    <div id="app" class="app" hidden>
+      <div class="topbar">
+        <div>
+          <h1>Fiscok_webui</h1>
+          <p id="subtitle">桥接状态、桌面端连接与记忆同步</p>
+        </div>
+        <div class="pills">
+          <span id="pill-bridge" class="pill"><span class="dot"></span><span id="pill-bridge-text">桥接</span></span>
+          <button id="btn-logout" class="btn btn-ghost" type="button">退出登录</button>
+        </div>
+      </div>
+
+      <div class="grid">
+        <section class="card col-4">
+          <div class="card-head">
+            <div>
+              <h2>桥接状态</h2>
+              <p class="hint">桌面端桥接接口的运行信息</p>
+            </div>
+            <span id="badge-relay" class="badge">-</span>
+          </div>
+          <div class="kv" id="bridge-kv"></div>
+          <div class="chip-row" id="whitelist-chips"></div>
+        </section>
+
+        <section class="card col-4">
+          <div class="card-head">
+            <div>
+              <h2>桌面端 / Live2D</h2>
+              <p class="hint">最近一次连接与聊天记录</p>
+            </div>
+            <span id="badge-desktop" class="badge lav">未连接</span>
+          </div>
+          <div class="kv" id="desktop-kv"></div>
+        </section>
+
+        <section class="card col-4">
+          <div class="card-head">
+            <div>
+              <h2>配置同步</h2>
+              <p class="hint">把地址与令牌填进 Kira Live 控制台 → AstrBot</p>
+            </div>
+            <span class="badge mint">只读</span>
+          </div>
+          <div class="copy-box">
+            <span class="mono" id="client-address">-</span>
+            <button class="copy-btn" type="button" data-copy="client-address">复制</button>
+          </div>
+          <div class="copy-box">
+            <span class="mono" id="client-token">-</span>
+            <button class="copy-btn" type="button" data-copy="client-token">复制</button>
+          </div>
+          <div class="msg" id="sync-msg">桌面端拉取一次后，这里会显示最近同步时间。</div>
+        </section>
+
+        <section class="card col-6">
+          <div class="card-head">
+            <div>
+              <h2>人设与情绪</h2>
+              <p class="hint">基线来自 AstrBot，演化自我设定两边共享</p>
+            </div>
+            <button id="btn-evolve" class="btn btn-ghost" type="button">演化一次</button>
+          </div>
+          <div class="kv" id="persona-kv"></div>
+          <div class="persona-text" id="persona-evolved">还没有演化自我设定。</div>
+          <div class="msg" id="evolve-msg"></div>
+        </section>
+
+        <section class="card col-6">
+          <div class="card-head">
+            <div>
+              <h2>个人记忆</h2>
+              <p class="hint" id="memory-hint">桌面端专属身份，与 QQ 用户隔离</p>
+            </div>
+            <span id="badge-memory" class="badge">0 条</span>
+          </div>
+          <div class="memory-list" id="memory-list"></div>
+          <form class="note-form" id="note-form">
+            <textarea id="note-text" maxlength="500" placeholder="写入一条长期记忆，例如：小主人喜欢在深夜写代码"></textarea>
+            <div class="row">
+              <select id="note-category">
+                <option value="profile">档案</option>
+                <option value="preference">偏好</option>
+                <option value="experience">经历</option>
+                <option value="plan">计划</option>
+                <option value="relation">关系</option>
+              </select>
+              <select id="note-importance">
+                <option value="3">重要度 3</option>
+                <option value="4">重要度 4</option>
+                <option value="5">重要度 5</option>
+                <option value="2">重要度 2</option>
+                <option value="1">重要度 1</option>
+              </select>
+              <button class="btn" type="submit">写入</button>
+            </div>
+            <div class="msg" id="note-msg"></div>
+          </form>
+        </section>
+
+        <section class="card col-12">
+          <div class="card-head">
+            <div>
+              <h2>表情包库</h2>
+              <p class="hint">管理已学习的表情包、描述、情绪与标签</p>
+            </div>
+            <span id="badge-meme" class="badge">0 条</span>
+          </div>
+          <div class="toolbar">
+            <input id="meme-q" placeholder="搜索描述或标签" />
+            <select id="meme-tag"><option value="">全部标签</option></select>
+            <select id="meme-emotion"><option value="">全部情绪</option></select>
+            <button id="meme-clear" class="mini-btn danger" type="button">清空库</button>
+          </div>
+          <div class="meme-grid" id="meme-list"></div>
+          <div class="msg" id="meme-msg"></div>
+        </section>
+
+        <section class="card col-6">
+          <div class="card-head">
+            <div>
+              <h2>话题记忆</h2>
+              <p class="hint">按会话保存的长期话题，可调整内容与重要度</p>
+            </div>
+            <div class="head-actions">
+              <span id="badge-topic" class="badge lav">0 会话</span>
+              <button id="topic-clear" class="mini-btn danger" type="button">清空当前会话</button>
+            </div>
+          </div>
+          <div class="toolbar"><select id="topic-scope"></select></div>
+          <div class="memory-list" id="topic-list"></div>
+          <div class="msg" id="topic-msg"></div>
+        </section>
+
+        <section class="card col-6">
+          <div class="card-head">
+            <div>
+              <h2>私聊记忆</h2>
+              <p class="hint">按 QQ 用户隔离的个人长期记忆</p>
+            </div>
+            <div class="head-actions">
+              <span id="badge-personal" class="badge lav">0 用户</span>
+              <button id="personal-clear" class="mini-btn danger" type="button">清空该用户</button>
+            </div>
+          </div>
+          <div class="toolbar"><select id="personal-user"></select></div>
+          <div class="memory-list" id="personal-list"></div>
+          <div class="msg" id="personal-msg"></div>
+        </section>
+
+        <section class="card col-12">
+          <div class="card-head">
+            <div>
+              <h2>情绪与好感度</h2>
+              <p class="hint">情绪是全局运行时状态，好感度按用户分别存储；修改后立即作用于桥接的 /chat</p>
+            </div>
+            <span id="badge-emotion" class="badge sun">-</span>
+          </div>
+          <div class="emotion-panels">
+            <div class="emotion-panel">
+              <h3>当前情绪</h3>
+              <div class="field">
+                <label for="emotion-current">整体情绪文字（如 开心、害羞、低落）</label>
+                <input id="emotion-current" type="text" maxlength="100" placeholder="尚未设置" />
+              </div>
+              <div class="emotion-actions">
+                <button id="emotion-save" class="btn" type="button">保存情绪</button>
+                <label><input id="emotion-persist" type="checkbox" /> 同时设为默认情绪</label>
+              </div>
+              <div id="emotion-range" class="emotion-range"></div>
+              <div class="msg" id="emotion-hint"></div>
+            </div>
+            <div class="emotion-panel">
+              <h3>手动设置好感度</h3>
+              <div class="field">
+                <label for="affinity-user">用户 ID</label>
+                <input id="affinity-user" type="text" placeholder="QQ 号或桌面端身份 ID" />
+              </div>
+              <div class="field">
+                <label for="affinity-nickname">昵称（可选）</label>
+                <input id="affinity-nickname" type="text" placeholder="用于在列表里辨认" />
+              </div>
+              <div class="field">
+                <label for="affinity-value">好感度数值</label>
+                <input id="affinity-value" type="number" step="1" placeholder="0 - 100" />
+              </div>
+              <div class="emotion-actions">
+                <button id="affinity-add" class="btn" type="button">设置</button>
+              </div>
+              <div class="msg" id="affinity-msg"></div>
+            </div>
+          </div>
+          <div id="affinity-list" class="affinity-list"></div>
+        </section>
+
+        <section class="card col-12">
+          <div class="card-head">
+            <div>
+              <h2>插件配置</h2>
+              <p class="hint">直接修改插件已实现功能的开关与阈值，保存后写入 AstrBot 配置</p>
+            </div>
+            <div class="head-actions">
+              <button id="config-reload" class="mini-btn" type="button">重新读取</button>
+              <button id="config-save" class="btn" type="button">保存配置</button>
+            </div>
+          </div>
+          <div class="config-sections" id="config-sections"></div>
+          <div class="msg" id="config-msg"></div>
+        </section>
+      </div>
+
+      <div class="foot">
+        Fiscok_webui 与桌面桥接共用端口；对外暴露时请配合反向代理与 IP 白名单。<br />
+        密码保存在插件数据目录 <span class="mono">suzu_webui.json</span>，只在本机日志可见。
+      </div>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id)
+      let snapshot = null
+      let timer = null
+
+      function fmtTime(value) {
+        if (!value) return '-'
+        const date = new Date(value)
+        if (Number.isNaN(date.getTime())) return String(value)
+        return date.toLocaleString('zh-CN', { hour12: false })
+      }
+
+      function setMsg(id, text, kind) {
+        const node = $(id)
+        node.textContent = text || ''
+        node.className = 'msg' + (kind ? ' ' + kind : '')
+      }
+
+      async function api(path, init) {
+        const response = await fetch(path, {
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          ...init
+        })
+        let data = null
+        try {
+          data = await response.json()
+        } catch {
+          data = null
+        }
+        if (!response.ok) {
+          const error = new Error((data && data.error) || 'HTTP ' + response.status)
+          error.status = response.status
+          throw error
+        }
+        return data
+      }
+
+      function showLogin() {
+        $('app').hidden = true
+        $('login').hidden = false
+        $('password').focus()
+      }
+
+      function showApp() {
+        $('login').hidden = true
+        $('app').hidden = false
+      }
+
+      async function checkSession() {
+        try {
+          await api('/ui/api/session')
+          showApp()
+          await refresh()
+          await loadConfig().catch((error) => setMsg('config-msg', error.message, 'error'))
+          startTimer()
+        } catch {
+          showLogin()
+        }
+      }
+
+      async function login() {
+        const password = $('password').value.trim()
+        if (!password) {
+          $('login-error').textContent = '请输入密码'
+          return
+        }
+        $('btn-login').disabled = true
+        $('login-error').textContent = ''
+        try {
+          await api('/ui/api/login', { method: 'POST', body: JSON.stringify({ password }) })
+          $('password').value = ''
+          showApp()
+          await refresh()
+          await loadConfig().catch((error) => setMsg('config-msg', error.message, 'error'))
+          startTimer()
+        } catch (error) {
+          $('login-error').textContent = error.message
+        } finally {
+          $('btn-login').disabled = false
+        }
+      }
+
+      function startTimer() {
+        if (timer) clearInterval(timer)
+        timer = setInterval(() => {
+          refresh().catch(() => {})
+        }, 10000)
+      }
+
+      function kv(rows) {
+        return rows
+          .map(
+            (row) =>
+              '<div class="kv-row"><span class="k">' + row[0] + '</span><span class="v">' + row[1] + '</span></div>'
+          )
+          .join('')
+      }
+
+      function esc(value) {
+        return String(value == null ? '' : value)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+      }
+
+      function render(data) {
+        snapshot = data
+        const bridge = data.bridge || {}
+        const desktop = data.desktop || {}
+        const persona = data.persona || {}
+        const memory = data.memory || {}
+        const user = data.user || {}
+
+        const on = bridge.running
+        $('pill-bridge').className = 'pill ' + (on ? 'on' : 'warn')
+        $('pill-bridge-text').textContent = on ? '桥接运行中' : '桥接未启动'
+        $('badge-relay').textContent = on ? 'HTTP 在线' : '离线'
+        $('badge-relay').className = 'badge ' + (on ? 'mint' : '')
+
+        $('bridge-kv').innerHTML = kv([
+          ['监听', esc(bridge.host) + ':' + esc(bridge.port)],
+          ['请求 / 拒绝', esc(bridge.requests) + ' / ' + esc(bridge.rejected)],
+          ['桌面令牌', bridge.hasToken ? '已配置' : '未配置'],
+          ['可信代理', (bridge.trusted || []).join('、') || '无']
+        ])
+        $('whitelist-chips').innerHTML = (bridge.whitelist || []).length
+          ? bridge.whitelist.map((item) => '<span class="chip">' + esc(item) + '</span>').join('')
+          : '<span class="chip">白名单未限制</span>'
+
+        const last = desktop.last || {}
+        $('badge-desktop').textContent = last.at ? '已连接' : '未连接'
+        $('badge-desktop').className = 'badge ' + (last.at ? 'mint' : 'lav')
+        $('desktop-kv').innerHTML = kv([
+          ['最近请求', fmtTime(last.at)],
+          ['来源地址', last.ip || '-'],
+          ['接口', last.path || '-'],
+          ['最近同步', fmtTime(desktop.bootstrapAt)],
+          ['最近聊天', fmtTime(desktop.chatAt)]
+        ])
+
+        $('client-address').textContent = bridge.address || '-'
+        $('client-token').textContent = bridge.token || '（未配置令牌）'
+        $('sync-msg').textContent = desktop.bootstrapAt
+          ? '桌面端上次拉取：' + fmtTime(desktop.bootstrapAt)
+          : '桌面端还没有拉取过，填好地址与令牌后点「拉取并同步」。'
+
+        $('persona-kv').innerHTML = kv([
+          ['基线人设', persona.baselineName || '（未读取到）'],
+          ['当前情绪', persona.emotion || '平静'],
+          ['好感度', esc(user.affinity == null ? '-' : user.affinity)],
+          ['记忆条数', esc(memory.count || 0)],
+          ['更新时间', fmtTime(persona.evolvedAt)]
+        ])
+        $('persona-evolved').textContent = persona.evolved || '还没有演化自我设定。'
+        $('badge-memory').textContent = (memory.count || 0) + ' 条'
+        $('memory-hint').textContent = '桌面端身份：' + (user.id || '-') + ' · ' + (user.nickname || '-')
+
+        const items = memory.items || []
+        $('memory-list').innerHTML = items.length
+          ? items
+              .map(
+                (item) =>
+                  '<div class="memory-item"><div class="meta"><span>' +
+                  esc(item.category || 'note') +
+                  '</span><span>重要度 ' +
+                  esc(item.importance) +
+                  ' · ' +
+                  fmtTime(item.updatedAt || item.createdAt) +
+                  '</span></div><div class="body">' +
+                  esc(item.text) +
+                  '</div></div>'
+              )
+              .join('')
+          : '<div class="empty">还没有个人记忆。</div>'
+      }
+
+      async function refresh() {
+        const data = await api('/ui/api/state')
+        render(data)
+        await Promise.all([
+          loadMemes().catch((error) => setMsg('meme-msg', error.message, 'error')),
+          loadTopics().catch((error) => setMsg('topic-msg', error.message, 'error')),
+          loadPersonal().catch((error) => setMsg('personal-msg', error.message, 'error')),
+          loadEmotion().catch((error) => setMsg('emotion-hint', error.message, 'error'))
+        ])
+      }
+
+      let memeItems = []
+      let topicItems = []
+      let personalItems = []
+      let emotionConfig = {}
+      let affinityUsers = []
+
+      async function loadMemes() {
+        const params = new URLSearchParams()
+        const keyword = $('meme-q').value.trim()
+        const tag = $('meme-tag').value
+        const emotion = $('meme-emotion').value
+        if (keyword) params.set('q', keyword)
+        if (tag) params.set('tag', tag)
+        if (emotion) params.set('emotion', emotion)
+        const data = await api('/ui/api/memes?' + params.toString())
+        memeItems = data.items || []
+        $('badge-meme').textContent = (data.total || 0) + ' 条'
+
+        const tagSelect = $('meme-tag')
+        const tagValue = tagSelect.value
+        tagSelect.innerHTML =
+          '<option value="">全部标签</option>' +
+          (data.tags || [])
+            .map((item) => '<option value="' + esc(item.name) + '">' + esc(item.name) + ' (' + esc(item.count) + ')</option>')
+            .join('')
+        tagSelect.value = tagValue
+
+        const emotionSelect = $('meme-emotion')
+        const emotionValue = emotionSelect.value
+        emotionSelect.innerHTML =
+          '<option value="">全部情绪</option>' +
+          (data.emotions || [])
+            .map((item) => '<option value="' + esc(item.name) + '">' + esc(item.name) + ' (' + esc(item.count) + ')</option>')
+            .join('')
+        emotionSelect.value = emotionValue
+
+        $('meme-list').innerHTML = memeItems.length
+          ? memeItems
+              .map(
+                (item) =>
+                  '<div class="meme-card"><img loading="lazy" src="' +
+                  esc(item.url) +
+                  '" alt="" /><div class="meme-body"><div class="meme-desc">' +
+                  esc(item.description || '（无描述）') +
+                  '</div><div class="tag-row">' +
+                  ((item.tags || [])
+                    .map((tag) => '<span class="tag-chip">' + esc(tag) + '</span>')
+                    .join('') || '<span class="empty">无标签</span>') +
+                  '</div><div class="meme-meta"><span>' +
+                  esc(item.emotion || '未标注情绪') +
+                  '</span><span>' +
+                  fmtTime(item.timestamp) +
+                  '</span></div><div class="meme-actions"><button class="mini-btn" type="button" data-meme-edit="' +
+                  esc(item.id) +
+                  '">编辑</button><button class="mini-btn danger" type="button" data-meme-delete="' +
+                  esc(item.id) +
+                  '">删除</button></div></div></div>'
+              )
+              .join('')
+          : '<div class="empty">表情包库为空。</div>'
+      }
+
+      async function editMeme(id) {
+        const meme = memeItems.find((item) => item.id === id)
+        if (!meme) return
+        const description = prompt('表情包描述（可留空）', meme.description)
+        if (description === null) return
+        const tags = prompt('标签（用逗号分隔）', (meme.tags || []).join(', '))
+        if (tags === null) return
+        const emotion = prompt('情绪标签（可留空）', meme.emotion)
+        if (emotion === null) return
+        try {
+          await api('/ui/api/memes/update', {
+            method: 'POST',
+            body: JSON.stringify({ id, description: description.trim(), tags, emotion: emotion.trim() })
+          })
+          setMsg('meme-msg', '已更新表情包', 'ok')
+          await loadMemes()
+        } catch (error) {
+          setMsg('meme-msg', error.message, 'error')
+        }
+      }
+
+      async function loadTopics() {
+        const selected = $('topic-scope').value
+        const data = await api('/ui/api/topics' + (selected ? '?scope=' + encodeURIComponent(selected) : ''))
+        topicItems = data.items || []
+        const scopeSelect = $('topic-scope')
+        const scopes = data.scopes || []
+        scopeSelect.innerHTML = scopes.length
+          ? scopes
+              .map((item) => '<option value="' + esc(item.scope) + '">' + esc(item.scope) + ' (' + esc(item.count) + ')</option>')
+              .join('')
+          : '<option value="">暂无会话</option>'
+        if (data.scope) scopeSelect.value = data.scope
+        $('badge-topic').textContent = scopes.length + ' 会话'
+
+        $('topic-list').innerHTML = topicItems.length
+          ? topicItems
+              .map(
+                (item) =>
+                  '<div class="memory-item"><div class="meta"><span>' +
+                  esc(item.ownerName || item.ownerId || '会话') +
+                  '</span><span>重要度 ' +
+                  esc(item.importance) +
+                  ' · ' +
+                  fmtTime(item.updatedAt || item.timestamp) +
+                  '</span></div><div class="body">' +
+                  esc(item.text) +
+                  '</div><div class="actions"><button class="mini-btn" type="button" data-topic-edit="' +
+                  esc(item.id) +
+                  '">改内容</button><button class="mini-btn" type="button" data-topic-importance="' +
+                  esc(item.id) +
+                  '">重要度</button><button class="mini-btn danger" type="button" data-topic-delete="' +
+                  esc(item.id) +
+                  '">删除</button></div></div>'
+              )
+              .join('')
+          : '<div class="empty">这个会话还没有话题记忆。</div>'
+      }
+
+      async function editTopicText(id) {
+        const item = topicItems.find((entry) => entry.id === id)
+        if (!item) return
+        const text = prompt('修改话题记忆内容', item.text)
+        if (text === null) return
+        try {
+          await api('/ui/api/topics/update', {
+            method: 'POST',
+            body: JSON.stringify({ id, text })
+          })
+          setMsg('topic-msg', '已更新话题记忆', 'ok')
+          await loadTopics()
+        } catch (error) {
+          setMsg('topic-msg', error.message, 'error')
+        }
+      }
+
+      async function editTopicImportance(id) {
+        const item = topicItems.find((entry) => entry.id === id)
+        if (!item) return
+        const value = prompt('重要度 1-5', item.importance)
+        if (value === null) return
+        const importance = Number(value)
+        if (!(importance >= 1 && importance <= 5)) {
+          setMsg('topic-msg', '重要度需要在 1-5 之间', 'error')
+          return
+        }
+        try {
+          await api('/ui/api/topics/update', {
+            method: 'POST',
+            body: JSON.stringify({ id, importance })
+          })
+          setMsg('topic-msg', '已调整重要度', 'ok')
+          await loadTopics()
+        } catch (error) {
+          setMsg('topic-msg', error.message, 'error')
+        }
+      }
+
+      async function loadPersonal() {
+        const selected = $('personal-user').value
+        const data = await api('/ui/api/personal' + (selected ? '?user_id=' + encodeURIComponent(selected) : ''))
+        personalItems = data.items || []
+        const userSelect = $('personal-user')
+        const users = data.users || []
+        userSelect.innerHTML = users.length
+          ? users
+              .map((item) => '<option value="' + esc(item.user_id) + '">' + esc(item.user_id) + ' (' + esc(item.count) + ')</option>')
+              .join('')
+          : '<option value="">暂无用户</option>'
+        if (data.userId) userSelect.value = data.userId
+        $('badge-personal').textContent = users.length + ' 用户'
+
+        $('personal-list').innerHTML = personalItems.length
+          ? personalItems
+              .map(
+                (item) =>
+                  '<div class="memory-item"><div class="meta"><span>' +
+                  esc(item.category || 'note') +
+                  '</span><span>重要度 ' +
+                  esc(item.importance) +
+                  ' · ' +
+                  fmtTime(item.updatedAt || item.createdAt) +
+                  '</span></div><div class="body">' +
+                  esc(item.text) +
+                  '</div><div class="actions"><button class="mini-btn" type="button" data-personal-edit="' +
+                  esc(item.id) +
+                  '">改内容</button><button class="mini-btn" type="button" data-personal-importance="' +
+                  esc(item.id) +
+                  '">重要度</button><button class="mini-btn danger" type="button" data-personal-delete="' +
+                  esc(item.id) +
+                  '">删除</button></div></div>'
+              )
+              .join('')
+          : '<div class="empty">这个用户还没有个人记忆。</div>'
+      }
+
+      async function editPersonalText(id) {
+        const item = personalItems.find((entry) => entry.id === id)
+        if (!item) return
+        const text = prompt('修改个人记忆内容', item.text)
+        if (text === null) return
+        try {
+          await api('/ui/api/personal/update', {
+            method: 'POST',
+            body: JSON.stringify({ userId: $('personal-user').value, id, text })
+          })
+          setMsg('personal-msg', '已更新个人记忆', 'ok')
+          await loadPersonal()
+        } catch (error) {
+          setMsg('personal-msg', error.message, 'error')
+        }
+      }
+
+      async function editPersonalImportance(id) {
+        const item = personalItems.find((entry) => entry.id === id)
+        if (!item) return
+        const value = prompt('重要度 1-5', item.importance)
+        if (value === null) return
+        const importance = Number(value)
+        if (!(importance >= 1 && importance <= 5)) {
+          setMsg('personal-msg', '重要度需要在 1-5 之间', 'error')
+          return
+        }
+        try {
+          await api('/ui/api/personal/update', {
+            method: 'POST',
+            body: JSON.stringify({ userId: $('personal-user').value, id, importance })
+          })
+          setMsg('personal-msg', '已调整重要度', 'ok')
+          await loadPersonal()
+        } catch (error) {
+          setMsg('personal-msg', error.message, 'error')
+        }
+      }
+
+      async function evolve() {
+        $('btn-evolve').disabled = true
+        setMsg('evolve-msg', '演化中…')
+        try {
+          const data = await api('/ui/api/evolve', { method: 'POST', body: '{}' })
+          render(data)
+          setMsg('evolve-msg', data.result && data.result.changed ? '人设已更新' : '这一轮没有变化', 'ok')
+        } catch (error) {
+          setMsg('evolve-msg', error.message, 'error')
+        } finally {
+          $('btn-evolve').disabled = false
+        }
+      }
+
+      async function addNote(event) {
+        event.preventDefault()
+        const text = $('note-text').value.trim()
+        if (!text) {
+          setMsg('note-msg', '记忆内容不能为空', 'error')
+          return
+        }
+        setMsg('note-msg', '写入中…')
+        try {
+          const data = await api('/ui/api/note', {
+            method: 'POST',
+            body: JSON.stringify({
+              text,
+              category: $('note-category').value,
+              importance: Number($('note-importance').value)
+            })
+          })
+          render(data)
+          $('note-text').value = ''
+          setMsg('note-msg', '已写入个人记忆', 'ok')
+        } catch (error) {
+          setMsg('note-msg', error.message, 'error')
+        }
+      }
+
+      async function deleteMeme(id) {
+        const meme = memeItems.find((item) => item.id === id)
+        if (!confirm('确定删除表情包「' + ((meme && meme.description) || id) + '」？图片文件会一起删除，且无法恢复。')) return
+        try {
+          await api('/ui/api/memes/delete', { method: 'POST', body: JSON.stringify({ id }) })
+          setMsg('meme-msg', '已删除表情包', 'ok')
+          await loadMemes()
+        } catch (error) {
+          setMsg('meme-msg', error.message, 'error')
+        }
+      }
+
+      async function clearMemes() {
+        if (!confirm('确定清空整个表情包库？所有表情包图片与记录都会被删除，且无法恢复。')) return
+        try {
+          const data = await api('/ui/api/memes/clear', { method: 'POST', body: '{}' })
+          setMsg('meme-msg', '已清空表情包库（' + (data.removed || 0) + ' 条）', 'ok')
+          await loadMemes()
+        } catch (error) {
+          setMsg('meme-msg', error.message, 'error')
+        }
+      }
+
+      async function deleteTopic(id) {
+        if (!confirm('确定删除这条话题记忆？无法恢复。')) return
+        try {
+          await api('/ui/api/topics/delete', { method: 'POST', body: JSON.stringify({ id }) })
+          setMsg('topic-msg', '已删除话题记忆', 'ok')
+          await loadTopics()
+        } catch (error) {
+          setMsg('topic-msg', error.message, 'error')
+        }
+      }
+
+      async function clearTopics() {
+        const scope = $('topic-scope').value
+        if (!scope) {
+          setMsg('topic-msg', '当前没有可清空的会话', 'error')
+          return
+        }
+        if (!confirm('确定清空会话「' + scope + '」的全部话题记忆？无法恢复。')) return
+        try {
+          await api('/ui/api/topics/clear', { method: 'POST', body: JSON.stringify({ scope }) })
+          setMsg('topic-msg', '已清空该会话的话题记忆', 'ok')
+          await loadTopics()
+        } catch (error) {
+          setMsg('topic-msg', error.message, 'error')
+        }
+      }
+
+      async function deletePersonal(id) {
+        const userId = $('personal-user').value
+        if (!userId) return
+        if (!confirm('确定删除这条个人记忆？无法恢复。')) return
+        try {
+          await api('/ui/api/personal/delete', {
+            method: 'POST',
+            body: JSON.stringify({ userId, id })
+          })
+          setMsg('personal-msg', '已删除个人记忆', 'ok')
+          await loadPersonal()
+        } catch (error) {
+          setMsg('personal-msg', error.message, 'error')
+        }
+      }
+
+      async function clearPersonal() {
+        const userId = $('personal-user').value
+        if (!userId) {
+          setMsg('personal-msg', '当前没有可清空的用户', 'error')
+          return
+        }
+        if (!confirm('确定清空用户「' + userId + '」的全部个人记忆？无法恢复。')) return
+        try {
+          await api('/ui/api/personal/clear', {
+            method: 'POST',
+            body: JSON.stringify({ userId })
+          })
+          setMsg('personal-msg', '已清空该用户的个人记忆', 'ok')
+          await loadPersonal()
+        } catch (error) {
+          setMsg('personal-msg', error.message, 'error')
+        }
+      }
+
+      function renderConfigField(section, field) {
+        const id = 'cfg-' + section + '-' + field.key
+        if (field.type === 'bool') {
+          return (
+            '<div class="config-field"><div class="cf-head"><label for="' +
+            esc(id) +
+            '">' +
+            esc(field.label) +
+            '</label><input id="' +
+            esc(id) +
+            '" type="checkbox" data-cfg-section="' +
+            esc(section) +
+            '" data-cfg-key="' +
+            esc(field.key) +
+            '" data-cfg-type="bool" ' +
+            (field.value ? 'checked' : '') +
+            ' /></div>' +
+            (field.hint ? '<div class="desc">' + esc(field.hint) + '</div>' : '') +
+            '</div>'
+          )
+        }
+        const inputType = field.type === 'string' ? 'text' : 'number'
+        const step = field.type === 'float' ? '0.01' : '1'
+        return (
+          '<div class="config-field"><div class="cf-head"><label for="' +
+          esc(id) +
+          '">' +
+          esc(field.label) +
+          '</label></div><input id="' +
+          esc(id) +
+          '" type="' +
+          inputType +
+          '" step="' +
+          step +
+          '" value="' +
+          esc(field.value === null || field.value === undefined ? '' : field.value) +
+          '" data-cfg-section="' +
+          esc(section) +
+          '" data-cfg-key="' +
+          esc(field.key) +
+          '" data-cfg-type="' +
+          esc(field.type) +
+          '" />' +
+          (field.hint ? '<div class="desc">' + esc(field.hint) + '</div>' : '') +
+          '</div>'
+        )
+      }
+
+      async function loadConfig() {
+        const data = await api('/ui/api/config')
+        const sections = data.sections || []
+        $('config-sections').innerHTML = sections.length
+          ? sections
+              .map(
+                (section) =>
+                  '<div class="config-section"><h3>' +
+                  esc(section.title) +
+                  '</h3>' +
+                  (section.fields || []).map((field) => renderConfigField(section.key, field)).join('') +
+                  '</div>'
+              )
+              .join('')
+          : '<div class="empty">没有可在线编辑的配置项。</div>'
+      }
+
+      async function saveConfig() {
+        const inputs = Array.from(document.querySelectorAll('[data-cfg-section]'))
+        if (!inputs.length) {
+          setMsg('config-msg', '还没有读取到配置项', 'error')
+          return
+        }
+        const values = inputs.map((input) => ({
+          section: input.dataset.cfgSection,
+          key: input.dataset.cfgKey,
+          value: input.dataset.cfgType === 'bool' ? input.checked : input.value
+        }))
+        $('config-save').disabled = true
+        setMsg('config-msg', '保存中…')
+        try {
+          const data = await api('/ui/api/config', {
+            method: 'POST',
+            body: JSON.stringify({ values })
+          })
+          setMsg('config-msg', '已保存 ' + (data.updated || 0) + ' 项配置', 'ok')
+          await loadConfig()
+        } catch (error) {
+          setMsg('config-msg', error.message, 'error')
+        } finally {
+          $('config-save').disabled = false
+        }
+      }
+
+      async function saveEmotion(persist) {
+        const emotion = $('emotion-current').value.trim()
+        if (!emotion) {
+          setMsg('emotion-hint', '情绪不能为空', 'error')
+          return
+        }
+        $('emotion-save').disabled = true
+        setMsg('emotion-hint', '保存中…')
+        try {
+          const data = await api('/ui/api/emotion', {
+            method: 'POST',
+            body: JSON.stringify({ emotion, persist })
+          })
+          $('emotion-current').value = data.emotion || emotion
+          $('badge-emotion').textContent = data.emotion || emotion
+          setMsg('emotion-hint', persist ? '已保存并设为默认情绪' : '已保存当前情绪', 'ok')
+          await refresh()
+        } catch (error) {
+          setMsg('emotion-hint', error.message, 'error')
+        } finally {
+          $('emotion-save').disabled = false
+        }
+      }
+
+      async function loadEmotion() {
+        const data = await api('/ui/api/emotion')
+        emotionConfig = data.config || {}
+        affinityUsers = data.users || []
+        if (document.activeElement !== $('emotion-current')) {
+          $('emotion-current').value = data.emotion || ''
+        }
+        $('badge-emotion').textContent = data.emotion || '未设置'
+        $('emotion-range').textContent =
+          '好感度范围 ' +
+          escNum(emotionConfig.min) +
+          ' - ' +
+          escNum(emotionConfig.max) +
+          '，新用户初始值 ' +
+          escNum(emotionConfig.init)
+        renderAffinity()
+      }
+
+      function escNum(value) {
+        return value == null ? '-' : String(value)
+      }
+
+      function renderAffinity() {
+        const max = emotionConfig.max == null ? 100 : Number(emotionConfig.max)
+        $('affinity-list').innerHTML = affinityUsers.length
+          ? affinityUsers
+              .map(
+                (item) =>
+                  '<div class="affinity-row"><div class="who"><span class="name">' +
+                  esc(item.nickname || item.user_id) +
+                  '</span><span class="sub">' +
+                  esc(item.user_id) +
+                  (item.last_update ? ' · ' + esc(item.last_update) : '') +
+                  '</span></div><span class="val">' +
+                  esc(item.affinity) +
+                  '</span><div class="actions"><button class="mini-btn" type="button" data-affinity-edit="' +
+                  esc(item.user_id) +
+                  '">修改</button><button class="mini-btn" type="button" data-affinity-reset="' +
+                  esc(item.user_id) +
+                  '">恢复默认</button></div></div>'
+              )
+              .join('')
+          : '<div class="empty">还没有好感度记录，用上方的「手动设置好感度」创建一条。</div>'
+        $('affinity-value').placeholder = '0 - ' + max
+      }
+
+      async function setAffinity(userId, affinity, nickname) {
+        if (!userId) {
+          setMsg('affinity-msg', '用户 ID 不能为空', 'error')
+          return null
+        }
+        const value = Number(affinity)
+        if (affinity === '' || affinity == null || !Number.isFinite(value)) {
+          setMsg('affinity-msg', '好感度必须是数字', 'error')
+          return null
+        }
+        try {
+          const data = await api('/ui/api/affinity', {
+            method: 'POST',
+            body: JSON.stringify({ userId, affinity: value, nickname: nickname || '' })
+          })
+          setMsg('affinity-msg', '用户 ' + userId + ' 好感度已设为 ' + data.affinity, 'ok')
+          await loadEmotion()
+          return data
+        } catch (error) {
+          setMsg('affinity-msg', error.message, 'error')
+          return null
+        }
+      }
+
+      function editAffinity(userId) {
+        const item = affinityUsers.find((entry) => entry.user_id === userId)
+        const value = prompt('设置用户「' + userId + '」的好感度', item ? item.affinity : '')
+        if (value === null) return
+        setAffinity(userId, value.trim(), item ? item.nickname : '')
+      }
+
+      function resetAffinity(userId) {
+        const item = affinityUsers.find((entry) => entry.user_id === userId)
+        const init = emotionConfig.init == null ? 50 : emotionConfig.init
+        if (!confirm('把用户「' + userId + '」的好感度恢复为默认值 ' + init + '？')) return
+        setAffinity(userId, init, item ? item.nickname : '')
+      }
+
+      async function addAffinity() {
+        const userId = $('affinity-user').value.trim()
+        await setAffinity(
+          userId,
+          $('affinity-value').value.trim(),
+          $('affinity-nickname').value.trim()
+        )
+      }
+
+      async function logout() {
+        try {
+          await api('/ui/api/logout', { method: 'POST', body: '{}' })
+        } catch {}
+        if (timer) clearInterval(timer)
+        timer = null
+        showLogin()
+      }
+
+      document.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-copy]')
+        if (!button) return
+        const source = $(button.dataset.copy)
+        const text = source ? source.textContent.trim() : ''
+        if (!text) return
+        navigator.clipboard.writeText(text).then(
+          () => {
+            button.textContent = '已复制'
+            setTimeout(() => (button.textContent = '复制'), 1200)
+          },
+          () => setMsg('sync-msg', '复制失败，请手动选中文本', 'error')
+        )
+      })
+
+      $('btn-login').addEventListener('click', login)
+      $('password').addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') login()
+      })
+      $('btn-logout').addEventListener('click', logout)
+      $('btn-evolve').addEventListener('click', evolve)
+      $('note-form').addEventListener('submit', addNote)
+
+      let memeSearchTimer = null
+      $('meme-q').addEventListener('input', () => {
+        if (memeSearchTimer) clearTimeout(memeSearchTimer)
+        memeSearchTimer = setTimeout(
+          () => loadMemes().catch((error) => setMsg('meme-msg', error.message, 'error')),
+          300
+        )
+      })
+      $('meme-tag').addEventListener('change', () =>
+        loadMemes().catch((error) => setMsg('meme-msg', error.message, 'error'))
+      )
+      $('meme-emotion').addEventListener('change', () =>
+        loadMemes().catch((error) => setMsg('meme-msg', error.message, 'error'))
+      )
+      $('topic-scope').addEventListener('change', () =>
+        loadTopics().catch((error) => setMsg('topic-msg', error.message, 'error'))
+      )
+      $('personal-user').addEventListener('change', () =>
+        loadPersonal().catch((error) => setMsg('personal-msg', error.message, 'error'))
+      )
+      $('meme-clear').addEventListener('click', clearMemes)
+      $('topic-clear').addEventListener('click', clearTopics)
+      $('personal-clear').addEventListener('click', clearPersonal)
+      $('config-save').addEventListener('click', saveConfig)
+      $('config-reload').addEventListener('click', () =>
+        loadConfig().catch((error) => setMsg('config-msg', error.message, 'error'))
+      )
+      $('emotion-save').addEventListener('click', () => saveEmotion($('emotion-persist').checked))
+      $('affinity-add').addEventListener('click', addAffinity)
+
+      document.addEventListener('click', (event) => {
+        const memeDelete = event.target.closest('[data-meme-delete]')
+        if (memeDelete) {
+          deleteMeme(memeDelete.dataset.memeDelete)
+          return
+        }
+        const meme = event.target.closest('[data-meme-edit]')
+        if (meme) {
+          editMeme(meme.dataset.memeEdit)
+          return
+        }
+        const topicDelete = event.target.closest('[data-topic-delete]')
+        if (topicDelete) {
+          deleteTopic(topicDelete.dataset.topicDelete)
+          return
+        }
+        const personalDelete = event.target.closest('[data-personal-delete]')
+        if (personalDelete) {
+          deletePersonal(personalDelete.dataset.personalDelete)
+          return
+        }
+        const topicEdit = event.target.closest('[data-topic-edit]')
+        if (topicEdit) {
+          editTopicText(topicEdit.dataset.topicEdit)
+          return
+        }
+        const topicImportance = event.target.closest('[data-topic-importance]')
+        if (topicImportance) {
+          editTopicImportance(topicImportance.dataset.topicImportance)
+          return
+        }
+        const personalEdit = event.target.closest('[data-personal-edit]')
+        if (personalEdit) {
+          editPersonalText(personalEdit.dataset.personalEdit)
+          return
+        }
+        const personalImportance = event.target.closest('[data-personal-importance]')
+        if (personalImportance) {
+          editPersonalImportance(personalImportance.dataset.personalImportance)
+          return
+        }
+        const affinityEdit = event.target.closest('[data-affinity-edit]')
+        if (affinityEdit) {
+          editAffinity(affinityEdit.dataset.affinityEdit)
+          return
+        }
+        const affinityReset = event.target.closest('[data-affinity-reset]')
+        if (affinityReset) {
+          resetAffinity(affinityReset.dataset.affinityReset)
+        }
+      })
+
+      checkSession()
+    </script>
+  </body>
+</html>
