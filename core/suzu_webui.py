@@ -315,7 +315,7 @@ class SuzuWebUI:
         umo = bridge._umo(user_id)
 
         try:
-            baseline = await bridge._baseline_persona(umo)
+            baseline = await bridge._baseline_persona(user_id, umo)
         except Exception:
             baseline = {"name": "", "prompt": ""}
         try:

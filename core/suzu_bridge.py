@@ -387,25 +387,47 @@ class SuzuBridge:
     def _umo(self, user_id: str) -> str:
         return f"desktop:{user_id}"
 
-    async def _baseline_persona(self, umo: str) -> Dict[str, str]:
-        try:
-            persona = await self.plugin.context.persona_manager.get_default_persona_v3(umo)
-            if isinstance(persona, dict):
-                return {
-                    "name": _clip(persona.get("name"), 40),
-                    "prompt": _clip(persona.get("prompt"), 4000),
-                }
-            if persona is not None:
-                return {
-                    "name": _clip(getattr(persona, "name", ""), 40),
-                    "prompt": _clip(
-                        getattr(persona, "prompt", "")
-                        or getattr(persona, "system_prompt", ""),
-                        4000,
-                    ),
-                }
-        except Exception as exc:
-            logger.warning(f"[Fiscok's][suzu] 读取默认 persona 失败: {exc}")
+    def _persona_umos(self, user_id: str) -> List[tuple]:
+        """人设基线优先复用绑定 QQ 的真实会话 umo，其次才回退到桌面虚拟 umo。"""
+        pairs: List[tuple] = []
+        if self.memory_qq:
+            try:
+                for inst in self.plugin.context.platform_manager.get_insts():
+                    pid = str(getattr(inst.meta(), "id", "") or "")
+                    if pid and ("qq" in pid.lower() or "napcat" in pid.lower()):
+                        pairs.append((pid, f"{pid}:FriendMessage:{self.memory_qq}"))
+            except Exception as exc:
+                logger.warning(f"[Fiscok's][suzu] 解析 QQ 平台失败: {exc}")
+        pairs.append(("", self._umo(user_id)))
+        return pairs
+
+    @staticmethod
+    def _persona_fields(persona: Any) -> Dict[str, str]:
+        if isinstance(persona, dict):
+            name = persona.get("name") or ""
+            prompt = persona.get("prompt") or persona.get("system_prompt") or ""
+        else:
+            name = getattr(persona, "name", "") or ""
+            prompt = getattr(persona, "prompt", "") or getattr(persona, "system_prompt", "") or ""
+        return {"name": _clip(name, 40), "prompt": _clip(prompt, 4000)}
+
+    async def _baseline_persona(self, user_id: str, umo: str) -> Dict[str, str]:
+        for platform_id, candidate in self._persona_umos(user_id):
+            try:
+                if platform_id:
+                    _, persona, _, _ = await self.plugin.context.persona_manager.resolve_selected_persona(
+                        umo=candidate,
+                        conversation_persona_id=None,
+                        platform_name=platform_id,
+                        provider_settings=self.plugin.config.get("provider_settings"),
+                    )
+                else:
+                    persona = await self.plugin.context.persona_manager.get_default_persona_v3(candidate)
+                fields = self._persona_fields(persona)
+                if fields["prompt"]:
+                    return fields
+            except Exception as exc:
+                logger.warning(f"[Fiscok's][suzu] 读取 persona 失败（{candidate}）: {exc}")
         return {"name": "", "prompt": ""}
 
     def _personal_memories(self, user_id: str) -> List[Dict[str, Any]]:
@@ -473,7 +495,7 @@ class SuzuBridge:
         user_id = self._user_id(request.query.get("user_id"))
         nickname = self._nickname(request.query.get("nickname"))
         umo = self._umo(user_id)
-        baseline = await self._baseline_persona(umo)
+        baseline = await self._baseline_persona(user_id, umo)
         evolved = self.plugin.data_manager.get_evolved_persona() or {}
         affinity = self.plugin.data_manager.get_user_affinity(user_id, nickname)
         memories = self._personal_memories(user_id)
@@ -560,7 +582,7 @@ class SuzuBridge:
         umo = self._umo(user_id)
 
         try:
-            baseline = await self._baseline_persona(umo)
+            baseline = await self._baseline_persona(user_id, umo)
             affinity = self.plugin.data_manager.get_user_affinity(user_id, nickname)
             system_parts: List[str] = []
             if baseline["prompt"]:
