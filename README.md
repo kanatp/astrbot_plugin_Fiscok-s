@@ -163,8 +163,8 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 - 接口：`GET /suzu/health`、`GET /suzu/bootstrap`、`POST /suzu/chat`、`GET /suzu/memory`、`POST /suzu/memory/note`、`POST /suzu/persona/evolve`
 - 鉴权：除 `/suzu/health` 外都需要 `Authorization: Bearer <token>`；未配置 token 且未配置白名单时，`/suzu` 接口只接受本机请求（WebUI 有独立的密码会话，仍可远程访问）
 - 来源限制：`allowed_ips` 支持 CIDR 白名单（留空不限制）；`trusted_proxies` 决定哪些地址发来的 `X-Forwarded-For` / `X-Real-IP` 会被采信，防止客户端伪造来源绕过白名单
-- 桌面端默认用 `default_user_id`（默认 `desktop_suzu`）保存个人记忆与好感度；在 WebUI 的 Live2D 标签页填「绑定 QQ 号」后，桌面端改为直接读写该 QQ 账号的个人长期记忆与好感度，和私聊完全一致（只输数字，留空即不绑定）；人设基线固定为 Live2D 标签页选定的 AstrBot 人格（如 `FisTohu`），不额外解析 QQ 会话人格；「演化自我设定」是全局共享内容，与绑定 QQ 使用同一份，桌面端不单独演化
-- 桌面聊天会复用插件的人设叠加、情绪/好感度与个人记忆注入；但桌面端不参与人设演化，只读取与绑定 QQ 共享的那份演化内容
+- 桌面端默认用 `default_user_id`（默认 `desktop_suzu`）保存个人记忆与好感度；在 WebUI 的 Live2D 标签页填「绑定 QQ 号」后，桌面端改为直接读写该 QQ 账号的个人长期记忆与好感度，和私聊完全一致（只输数字，留空即不绑定）；人设基线固定为 Live2D 标签页选定的 AstrBot 人格（如 `FisTohu`），不额外解析 QQ 会话人格；「演化自我设定」是全局共享内容，绑定 QQ 后桌面对话直接并入该 QQ 私聊的演化对话池，两边共同影响同一份结果
+- 桌面聊天会复用插件的人设叠加、情绪/好感度与个人记忆注入；绑定 QQ 后，人设演化对话与计数直接复用该 QQ 私聊会话（共享同一份演化内容），桌面发言同样影响 QQ 那边的演化结果
 
 #### LLM 对 Live2D 的控制范围
 
