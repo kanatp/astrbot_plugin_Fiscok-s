@@ -49,14 +49,19 @@ def validate_sequence(
                 "reset",
                 "interrupt",
             ):
-                raise ValueError("序列包含非法动作")
+                raise ValueError(
+                    "序列包含非法动作: "
+                    + json.dumps(step.get("action"), ensure_ascii=False)[:160]
+                )
             action = actions[0]
             action_count += 1
             waiting = step.get(
                 "waitForCompletion", action["type"] in ("motion", "intent")
             )
             if type(waiting) is not bool or action_count > (4 if proactive else 8):
-                raise ValueError("序列动作数量超限")
+                raise ValueError(
+                    f"序列动作数量超限: {action_count} > {4 if proactive else 8}"
+                )
             if proactive and "holdMs" in action:
                 action["holdMs"] = min(15000, action["holdMs"])
             if waiting:
@@ -82,15 +87,31 @@ def validate_sequence(
         ):
             budget += step["durationMs"]
             result.append({"type": "wait", "durationMs": step["durationMs"]})
+        elif kind == "wait":
+            raise ValueError(
+                "wait 步长不合法（0~5000ms）: "
+                + json.dumps(step, ensure_ascii=False)[:160]
+            )
+        elif kind == "say":
+            raise ValueError(
+                "say 步骤缺少文字: " + json.dumps(step, ensure_ascii=False)[:160]
+            )
         else:
-            raise ValueError("序列步骤不合法")
+            raise ValueError(
+                f"未知序列步骤类型 {kind!r}: "
+                + json.dumps(step, ensure_ascii=False)[:160]
+            )
     if (
         not action_count
         and not text_length
         or text_length > (400 if proactive else 12000)
         or budget > (45000 if proactive else 90000)
     ):
-        raise ValueError("序列文字量或总时长超限")
+        raise ValueError(
+            f"序列文字量或总时长超限: 文字 {text_length}/"
+            f"{400 if proactive else 12000}，"
+            f"总时长 {int(budget)}ms/{45000 if proactive else 90000}ms"
+        )
     return result
 
 

@@ -693,39 +693,62 @@ class CompanionRouter:
                 ),
                 timeout=6,
             )
-            completion = getattr(response, "completion_text", "")
-            if not isinstance(completion, str):
-                completion = response if isinstance(response, str) else ""
-            completion = completion.strip()
-            if completion.startswith("```json\n") and completion.endswith("```"):
-                completion = completion[8:-3].strip()
-            elif completion.startswith("```\n") and completion.endswith("```"):
-                completion = completion[4:-3].strip()
+        except Exception as exc:
+            hint = "（已附带截图，Provider 可能不支持图片）" if image_urls else ""
+            self.log(
+                f"主动陪伴 Provider 调用失败: {type(exc).__name__}: {exc}{hint}"
+            )
+            return None
+
+        completion = getattr(response, "completion_text", "")
+        if not isinstance(completion, str):
+            completion = response if isinstance(response, str) else ""
+        completion = completion.strip()
+        if completion.startswith("```json\n") and completion.endswith("```"):
+            completion = completion[8:-3].strip()
+        elif completion.startswith("```\n") and completion.endswith("```"):
+            completion = completion[4:-3].strip()
+        try:
             generated = json.loads(completion)
-            if not isinstance(generated, dict):
+        except ValueError:
+            self.log(f"主动陪伴输出不是合法 JSON（前 240 字）: {completion[:240]}")
+            return None
+        if not isinstance(generated, dict):
+            self.log(f"主动陪伴输出不是 JSON 对象（前 240 字）: {completion[:240]}")
+            return None
+        if "sequence" in generated:
+            if generated.get("sequenceVersion") != 1:
+                self.log(
+                    f"主动陪伴序列版本不支持: {generated.get('sequenceVersion')!r}"
+                )
                 return None
-            if "sequence" in generated:
-                if generated.get("sequenceVersion") != 1:
-                    return None
-                if not generated["sequence"]:
-                    return {"text": "", "actions": []}
+            if not generated["sequence"]:
+                return {"text": "", "actions": []}
+            try:
                 sequence = validate_sequence(
                     generated["sequence"], capabilities, proactive=True
                 )
-                if not can_speak:
-                    sequence = [step for step in sequence if step["type"] != "say"]
-                return {
-                    "text": sequence_text(sequence),
-                    "actions": sequence_actions(sequence),
-                    "sequence": sequence,
-                }
-            spoken = generated.get("reply", "")
-            if not isinstance(spoken, str) or len(spoken) > 400:
+            except ValueError as exc:
+                self.log(
+                    f"主动陪伴序列校验失败: {exc}；"
+                    f"motions={capabilities.get('motions')}, "
+                    f"intents={capabilities.get('intents')}, "
+                    f"expressions={capabilities.get('expressions')}；"
+                    f"输出: {completion[:240]}"
+                )
                 return None
-            result: Dict[str, Any] = {"text": spoken.strip() if can_speak else ""}
-            if "actions" in generated:
-                result["actions"] = generated["actions"]
-            return result
-        except Exception as exc:
-            self.log(f"主动陪伴 Provider 输出不可用: {type(exc).__name__}")
+            if not can_speak:
+                sequence = [step for step in sequence if step["type"] != "say"]
+            return {
+                "text": sequence_text(sequence),
+                "actions": sequence_actions(sequence),
+                "sequence": sequence,
+            }
+        spoken = generated.get("reply", "")
+        if not isinstance(spoken, str) or len(spoken) > 400:
+            self.log(f"主动陪伴回复字段不合法（前 240 字）: {completion[:240]}")
             return None
+        result: Dict[str, Any] = {"text": spoken.strip() if can_speak else ""}
+        if "actions" in generated:
+            result["actions"] = generated["actions"]
+        return result

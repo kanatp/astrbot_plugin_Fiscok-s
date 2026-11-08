@@ -329,10 +329,11 @@
         "default": false
       },
       "llm_provider_id": {
-        "description": "记忆抽取所用的辅助 LLM（留空则使用第一个可用模型）",
+        "description": "记忆抽取所用的辅助 LLM Provider（低温度，后台调用）",
         "type": "string",
         "default": "",
-        "hint": "建议用轻量模型；留空回退到第一个 Provider"
+        "_special": "select_provider",
+        "hint": "建议用轻量模型；留空时使用第一个可用的模型，辅助调用会自动关闭思考模式"
       },
       "embedding_provider_id": {
         "description": "记忆与检索所用的 Embedding Provider ID（留空则使用第一个可用 Embedding Provider）",
