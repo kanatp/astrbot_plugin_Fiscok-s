@@ -12,10 +12,18 @@ from typing import Any, Dict, List
 
 # 供主动决策使用的补充约束；聊天在管线模式下由服务端派生序列，不强制模型输出 JSON。
 PROACTIVE_SEQUENCE_NOTE = (
+    '只允许三种步骤：{"type":"action","action":{"type":"motion|intent|expression|pose|attention",'
+    '"name":"<能力表里的名字>"},"waitForCompletion":true}、{"type":"say","text":"<发言>"}、'
+    '{"type":"wait","durationMs":<0~5000>}。动作必须包在 action.action 里，'
+    "不能直接把 motion 写成步骤类型；动作名/表情名必须来自能力表，不得自创。"
     "主动模式最多 4 个动作、400 字、总阻塞不超过 45 秒；禁止 reset/interrupt；"
     "保持类动作最长 15 秒。can_speak=false 时不能发言，可只做动作。"
     "允许 sequence 为空表示保持安静，此时不要下发命令。"
 )
+
+
+# 模型常把动作直接写成步骤类型（{"type":"motion","name":...}），这里归一成标准 action 步骤。
+_ACTION_STEP_TYPES = ("motion", "intent", "expression", "pose", "attention")
 
 
 def _finite(value: Any) -> bool:
@@ -39,7 +47,19 @@ def validate_sequence(
     for step in raw:
         if not isinstance(step, dict):
             raise ValueError("序列步骤必须为对象")
+        raw_step = step
         kind = step.get("type")
+        if isinstance(kind, str) and kind in _ACTION_STEP_TYPES and "action" not in step:
+            spec = {
+                key: value
+                for key, value in step.items()
+                if key not in ("type", "waitForCompletion")
+            }
+            spec["type"] = kind
+            step = {"type": "action", "action": spec}
+            if "waitForCompletion" in raw_step:
+                step["waitForCompletion"] = raw_step["waitForCompletion"]
+            kind = "action"
         if kind == "action":
             # 复用动作白名单与范围校验；未声明或越界的动作整条拒绝。
             from .companion_router import validate_actions
