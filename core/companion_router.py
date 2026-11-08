@@ -1,4 +1,4 @@
-"""主动陪伴协议 v1 的服务端路由器。
+"""主动陪伴协议 v1 的服务端路由器（兼容 sequenceVersion=1）。
 
 桌面端约每 15 秒 POST /suzu/companion/sync：上行事件与执行回执，下行待执行指令。
 参考 erdi_pet/bridge/companion_router.py，按本插件现状适配：
@@ -15,6 +15,16 @@ import time
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
+
+from .behavior_sequence import (
+    PROACTIVE_SEQUENCE_NOTE,
+    environment_reference,
+    fresh_environment,
+    sequence_actions,
+    sequence_text,
+    validate_execution,
+    validate_sequence,
+)
 
 PROTOCOL_VERSION = 1
 
@@ -40,16 +50,27 @@ EVENT_PRIORITY = {
     "external.signal": 3,
     "interaction.hover": 4,
     "ambient.opportunity": 5,
+    "context.app_changed": 5,
     "interaction.moved": 6,
 }
 
+# 允许向 Provider 要发言的事件；普通点击也可以，但悬停只做注视
+PROVIDER_EVENTS = {
+    "activity.resumed",
+    "lifecycle.started",
+    "ambient.opportunity",
+    "context.app_changed",
+    "external.signal",
+    "interaction.click",
+}
+
 RECEIPT_STATUS = ("accepted", "suppressed", "rejected", "cancelled")
-ACTION_TYPES = {"motion", "intent", "expression", "pose", "attention", "interrupt", "reset"}
 
 PROACTIVE_PROMPT = (
-    "系统主动陪伴事件（不是用户消息）。你可以选择保持安静。"
-    '只返回 JSON：{"reply":"不超过160字的简短关心或空字符串"}。'
-    "不要宣称看到了未提供的画面，也不要声称检测到人的真实视线。\n"
+    "系统主动陪伴机会（不是用户消息）。请结合提供的屏幕参考内容、事件与会话，"
+    "自主选择动作和简短发言；可以保持安静。只有提供了屏幕资料才能据此回应，"
+    "不要重复打扰。输出 JSON：{\"sequenceVersion\":1,\"sequence\":[...]}，"
+    "sequence 为空表示保持安静。\n"
 )
 
 MAX_SCOPES = 128
@@ -57,6 +78,7 @@ MAX_EVENTS = 512
 MAX_COMMANDS = 128
 MAX_HISTORY = 128
 MAX_RECEIPTS = 512
+MAX_SAVED = 512
 
 
 def _finite(value: Any) -> bool:
@@ -80,7 +102,10 @@ def normalize_capabilities(raw: Any) -> Dict[str, Any]:
         )
     features = raw.get("features")
     result["features"] = (
-        {key: features.get(key) is True for key in ("attention", "proactive")}
+        {
+            key: features.get(key) is True
+            for key in ("attention", "proactive", "behaviorSequence")
+        }
         if isinstance(features, dict)
         else {}
     )
@@ -208,6 +233,7 @@ class CompanionRouter:
                 "commands": OrderedDict(),
                 "history": OrderedDict(),
                 "receipts": OrderedDict(),
+                "saved": OrderedDict(),
                 "capabilities": {},
                 "lock": asyncio.Lock(),
             }
@@ -225,8 +251,9 @@ class CompanionRouter:
         authenticated_identity: str,
         session_id: str,
         instance_id: str,
-        actions: Any,
+        actions: Any = None,
         text: str = "",
+        sequence: Any = None,
         trigger_event_id: Optional[str] = None,
         ttl_ms: int = 30000,
     ) -> Dict[str, Any]:
@@ -235,6 +262,11 @@ class CompanionRouter:
         scope = self._scope(key)
         if not scope["capabilities"]:
             raise ValueError("桌面端尚未同步能力")
+        if sequence is not None:
+            if not scope["capabilities"].get("features", {}).get("behaviorSequence"):
+                raise ValueError("桌面端不支持行为序列")
+            sequence = validate_sequence(sequence, scope["capabilities"], proactive=True)
+            actions, text = sequence_actions(sequence), sequence_text(sequence)
         checked, warnings = validate_actions(actions, scope["capabilities"])
         if (
             warnings
@@ -259,6 +291,8 @@ class CompanionRouter:
             "text": text.strip(),
             "actions": checked,
         }
+        if sequence is not None:
+            command.update(sequenceVersion=1, sequence=sequence)
         if trigger_event_id:
             command["triggerEventId"] = trigger_event_id
         scope["commands"][command["id"]] = command
@@ -327,6 +361,7 @@ class CompanionRouter:
         provider: Any = None,
         system_prompt: str = "",
         contexts: Optional[List[dict]] = None,
+        image_urls: Optional[List[str]] = None,
         decide: Optional[Callable[..., Awaitable[Optional[dict]]]] = None,
         save_proactive: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
@@ -362,20 +397,31 @@ class CompanionRouter:
                 if receipt.get("status") not in RECEIPT_STATUS:
                     continue
                 original = scope["commands"].get(command_id) or scope["history"].get(command_id)
-                if (
-                    original
-                    and receipt["status"] == "accepted"
-                    and original.get("text")
-                    and command_id not in scope["receipts"]
-                    and save_proactive
-                ):
-                    # 只保存助手主动话语；系统事件不能伪装成用户聊天。
+                spoken = ""
+                if original and receipt["status"] == "accepted":
+                    if "sequence" in original:
+                        # 序列要等执行回执里的 spokenText，取消前未执行的发言不能算说过。
+                        execution = receipt.get("execution")
+                        if execution is not None:
+                            try:
+                                spoken = validate_execution(
+                                    execution, original["sequence"]
+                                )["spokenText"]
+                            except ValueError:
+                                spoken = ""
+                    else:
+                        spoken = original.get("text", "")
+                if spoken and command_id not in scope["saved"] and save_proactive:
                     try:
                         await save_proactive(
-                            f"{authenticated_identity}/{session_id}", command_id, original["text"]
+                            f"{authenticated_identity}/{session_id}", command_id, spoken
                         )
+                        scope["saved"][command_id] = now
+                        while len(scope["saved"]) > MAX_SAVED:
+                            scope["saved"].popitem(last=False)
                     except Exception as exc:
                         self.log(f"保存主动话语失败: {type(exc).__name__}: {exc}")
+                # 接收回执与执行回执是两条独立消息，同 id 再次上报不能被丢弃。
                 if original or command_id in scope["receipts"]:
                     scope["receipts"][command_id] = now
                 if original:
@@ -415,6 +461,7 @@ class CompanionRouter:
             )
             budget = self._budget(key[:2])
             budget["speech"] = [at for at in budget["speech"] if now - at < 3600000]
+            environment = fresh_environment(body.get("environment"), now)
 
             if new_events and not blocked:
                 await self._maybe_queue(
@@ -423,9 +470,11 @@ class CompanionRouter:
                     new_events,
                     state,
                     budget,
+                    environment=environment,
                     provider=provider,
                     system_prompt=system_prompt,
                     contexts=contexts,
+                    image_urls=image_urls if environment else None,
                     decide=decide,
                 )
 
@@ -460,6 +509,17 @@ class CompanionRouter:
             self.budgets.popitem(last=False)
         return budget
 
+    def _can_speak(self, state: Dict[str, Any], budget: Dict[str, Any], now: int) -> bool:
+        return bool(
+            state.get("allowSpeech")
+            and state.get("speechRemaining", 0) > 0
+            and state.get("speechCooldownRemainingMs", 1) == 0
+            and state.get("postChatGraceRemainingMs", 0) == 0
+            and (state.get("idleSeconds", 0) or 0) >= 2
+            and now - budget["lastSpeech"] >= 600000
+            and len(budget["speech"]) < 4
+        )
+
     async def _maybe_queue(
         self,
         key: Tuple[str, str, str],
@@ -468,9 +528,11 @@ class CompanionRouter:
         state: Dict[str, Any],
         budget: Dict[str, Any],
         *,
+        environment: Optional[Dict[str, Any]],
         provider: Any,
         system_prompt: str,
         contexts: Optional[List[dict]],
+        image_urls: Optional[List[str]],
         decide: Optional[Callable[..., Awaitable[Optional[dict]]]],
     ) -> None:
         candidates = [event for event in new_events if event["type"] in EVENT_PRIORITY]
@@ -488,11 +550,10 @@ class CompanionRouter:
 
         capabilities = scope["capabilities"]
         actions: List[dict] = []
-        attention_enabled = (
+        if (
             capabilities.get("features", {}).get("attention") is True
             and state.get("attention")
-        )
-        if attention_enabled:
+        ):
             actions.append(
                 {
                     "type": "attention",
@@ -509,14 +570,16 @@ class CompanionRouter:
                 actions.append({"type": "motion", "name": motion, "mode": "interrupt"})
 
         decision: Dict[str, Any] = {"text": "", "actions": actions}
+        can_speak = self._can_speak(state, budget, now)
         if decide:
-            # 插件可用它接已有 Agent/规则；返回 None 表示沿用默认轻动作。
+            # 自定义 Agent/规则同样拿到经过时效检查的屏幕上下文。
             try:
                 custom = await asyncio.wait_for(
                     decide(
                         event=event,
                         state=state,
                         capabilities=capabilities,
+                        environment=environment,
                         identity=key[0],
                         session_id=key[1],
                     ),
@@ -527,78 +590,105 @@ class CompanionRouter:
                 custom = None
             if isinstance(custom, dict):
                 decision = custom
-        elif provider and self._can_speak(event, state, budget, now):
-            spoken = await self._ask_provider(
-                provider, event, system_prompt, contexts, key
+        elif (
+            provider
+            and not attention_only
+            and event["type"] in PROVIDER_EVENTS
+        ):
+            generated = await self._ask_provider(
+                provider,
+                event,
+                state,
+                capabilities,
+                can_speak,
+                environment,
+                system_prompt,
+                contexts,
+                image_urls,
+                key,
             )
-            if spoken:
-                decision["text"] = spoken
+            if generated is not None:
+                decision.update(generated)
 
         text = decision.get("text", "")
         if not isinstance(text, str):
             text = ""
-        text = text.strip()[:160]
+        text = text.strip()[:400]
         if text and (
             not state.get("allowSpeech")
             or state.get("speechRemaining", 0) <= 0
             or state.get("speechCooldownRemainingMs", 1) > 0
         ):
             text = ""
-        checked_actions = decision.get("actions", [])
-        if text or checked_actions:
-            try:
-                self.enqueue(
-                    authenticated_identity=key[0],
-                    session_id=key[1],
-                    instance_id=key[2],
-                    actions=checked_actions,
-                    text=text,
-                    trigger_event_id=event["id"],
-                )
-            except ValueError as exc:
-                self.log(f"主动指令入队被拒: {exc}")
-                return
-            budget["lastAttention" if attention_only else "lastAction"] = self.now()
-            if text:
-                budget["lastSpeech"] = self.now()
-                budget["speech"].append(self.now())
 
-    @staticmethod
-    def _can_speak(
-        event: dict, state: dict, budget: dict, now: int
-    ) -> bool:
-        if event["type"] not in ("activity.resumed", "lifecycle.started", "ambient.opportunity"):
-            return False
-        if not state.get("allowSpeech"):
-            return False
-        if state.get("speechRemaining", 0) <= 0:
-            return False
-        if state.get("speechCooldownRemainingMs", 1) != 0:
-            return False
-        if state.get("postChatGraceRemainingMs", 0) > 0:
-            return False
-        if (state.get("idleSeconds", 0) or 0) < 2:
-            return False
-        if now - budget["lastSpeech"] < 600000:
-            return False
-        return len(budget["speech"]) < 4
+        sequence = decision.get("sequence")
+        if sequence is not None and not text:
+            sequence = [step for step in sequence if step["type"] != "say"]
+        supports_sequence = (
+            capabilities.get("features", {}).get("behaviorSequence") is True
+        )
+        if sequence is None and supports_sequence:
+            sequence = [
+                {
+                    "type": "action",
+                    "action": action,
+                    "waitForCompletion": action["type"] in ("motion", "intent"),
+                }
+                for action in decision.get("actions", [])
+            ]
+            if text:
+                hold = max(1600, min(15000, len(text) * 180))
+                sequence.append({"type": "say", "text": text, "holdMs": hold})
+        if not supports_sequence:
+            sequence = None
+        if not (text or decision.get("actions") or sequence):
+            return
+        try:
+            self.enqueue(
+                authenticated_identity=key[0],
+                session_id=key[1],
+                instance_id=key[2],
+                actions=decision.get("actions", []),
+                text=text,
+                sequence=sequence or None,
+                trigger_event_id=event["id"],
+            )
+        except ValueError as exc:
+            self.log(f"主动指令入队被拒: {exc}")
+            return
+        budget["lastAttention" if attention_only else "lastAction"] = self.now()
+        if text:
+            budget["lastSpeech"] = self.now()
+            budget["speech"].append(self.now())
 
     async def _ask_provider(
         self,
         provider: Any,
         event: dict,
+        state: Dict[str, Any],
+        capabilities: Dict[str, Any],
+        can_speak: bool,
+        environment: Optional[Dict[str, Any]],
         system_prompt: str,
         contexts: Optional[List[dict]],
+        image_urls: Optional[List[str]],
         key: Tuple[str, str, str],
-    ) -> str:
-        """六秒内取回一句可选的主动关心；失败或输出不合法就保持安静。"""
-        prompt = PROACTIVE_PROMPT + json.dumps(event, ensure_ascii=False)
+    ) -> Optional[Dict[str, Any]]:
+        """六秒内取回一个可选的行为计划；失败或输出不合法返回 None（只保留轻动作）。"""
+        prompt = PROACTIVE_PROMPT + json.dumps(
+            {"event": event, "can_speak": can_speak, "desktop_capabilities": capabilities},
+            ensure_ascii=False,
+        )
+        if environment:
+            prompt += environment_reference(environment)
+        instruction = system_prompt + "\n" + PROACTIVE_SEQUENCE_NOTE
         try:
             response = await asyncio.wait_for(
                 provider.text_chat(
                     prompt=prompt,
                     contexts=contexts or [],
-                    system_prompt=system_prompt,
+                    system_prompt=instruction,
+                    image_urls=image_urls or None,
                     session_id=f"{key[0]}/{key[1]}",
                 ),
                 timeout=6,
@@ -606,8 +696,36 @@ class CompanionRouter:
             completion = getattr(response, "completion_text", "")
             if not isinstance(completion, str):
                 completion = response if isinstance(response, str) else ""
-            generated = json.loads(completion).get("reply", "")
-            return generated.strip()[:160] if isinstance(generated, str) else ""
+            completion = completion.strip()
+            if completion.startswith("```json\n") and completion.endswith("```"):
+                completion = completion[8:-3].strip()
+            elif completion.startswith("```\n") and completion.endswith("```"):
+                completion = completion[4:-3].strip()
+            generated = json.loads(completion)
+            if not isinstance(generated, dict):
+                return None
+            if "sequence" in generated:
+                if generated.get("sequenceVersion") != 1:
+                    return None
+                if not generated["sequence"]:
+                    return {"text": "", "actions": []}
+                sequence = validate_sequence(
+                    generated["sequence"], capabilities, proactive=True
+                )
+                if not can_speak:
+                    sequence = [step for step in sequence if step["type"] != "say"]
+                return {
+                    "text": sequence_text(sequence),
+                    "actions": sequence_actions(sequence),
+                    "sequence": sequence,
+                }
+            spoken = generated.get("reply", "")
+            if not isinstance(spoken, str) or len(spoken) > 400:
+                return None
+            result: Dict[str, Any] = {"text": spoken.strip() if can_speak else ""}
+            if "actions" in generated:
+                result["actions"] = generated["actions"]
+            return result
         except Exception as exc:
             self.log(f"主动陪伴 Provider 输出不可用: {type(exc).__name__}")
-            return ""
+            return None

@@ -181,17 +181,21 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 - 图片输入默认开启，可在 WebUI 的 Live2D 标签页「允许图片输入」关闭；关闭或 Provider 不支持图片时会在 `warnings` 说明，并令 `visionUsed=false`
 - `POST /suzu/action-result` 接收动作执行回执，按身份 + `sessionId` + `requestId` 校验下标与类型，五分钟内只接受一次，未知请求返回 404
 - `actions` 只会包含客户端 `capabilities` 里声明过的 `motion` / `expression`，未声明的不下发
+- 客户端声明 `capabilities.features.behaviorSequence` 时，响应额外返回 `sequenceVersion: 1` 与 `sequence`（先动作、后发言，严格按步数/文字量/总时长校验）；存在 `sequence` 时它是唯一执行计划，`reply` / `actions` 仅作兼容
+- `POST /suzu/action-result` 支持 `execution`：`steps` 必须逐一对应原始步骤下标，`spokenText` 必须是原发言的前缀；先 `accepted`、后带 `execution` 的同 `requestId` 上报不会丢失
 
 #### 主动陪伴（主动协议 v1）
 
 桥接按 `erdi_pet/docs/COMPANION_EVENTS.md` 实现了主动陪伴，与聊天 v2 并存：
 
-- `GET /suzu/health` 声明 `features.proactiveEvents=true`，桌面端据此启用出站同步
+- `GET /suzu/health` 声明 `features.proactiveEvents=true`，桌面端据此启用出站同步；主动路由真的会把截图交给支持图片的 Provider 时才声明 `features.proactiveVisionInput=true`
 - `POST /suzu/companion/sync` 接收 `events` / `receipts` / `state` / `capabilities`，返回 `ackEventIds`、`ackReceiptIds` 与最多 8 条待执行 `commands`；`requestId` 原样回传
 - 事件按 `id` 去重（每实例最多 512 条），只对 30 秒内的新事件决策；同类型两秒限频由桌面端负责
 - 默认策略：停留/悬停优先安静看向鼠标（10 秒注意力冷却），点击、输入恢复、启动、机会事件选择看向前方 + 微笑 + 点头/轻微摆动（45 秒动作冷却）
-- 只有启动、输入恢复、机会事件且预算允许时才调用 Provider 生成一句不超过 160 字的关心，6 秒超时或输出不合法就保持安静，不编造问候
-- 主动话语在收到 `accepted` 回执后写回 AstrBot 同一会话历史（按 `commandId` 幂等），不会伪造用户消息
+- 点击、启动、输入恢复、应用切换、外部信号与机会事件且预算允许时才调用 Provider 生成行为计划；悬停只做注视、不请求模型；6 秒超时或输出不合法就只保留轻动作，不编造问候
+- 同步可携带 `environment`（窗口、文字、截图）：超过 30 秒的屏幕资料直接丢弃；截图仅接受 `image/jpeg`、`capturedAt` 一分钟内、解码后 ≤5MB，通过校验才交给 Provider
+- 声明 `capabilities.features.behaviorSequence` 时下发 `sequenceVersion: 1` 与 `sequence`；主动序列最多 4 个动作、400 字、总阻塞 45 秒，`can_speak=false` 时自动去掉发言步骤
+- 主动话语在收到 `accepted` 回执后写回 AstrBot 同一会话历史（按 `commandId` 幂等）；序列只在执行回执的 `spokenText` 确认后保存实际说过的内容，同 ID 的后续执行回执不会被丢弃
 - `kind=cancel` 可取消本实例尚未回执的指令；用户发起聊天时，该会话所有未下发的主动指令会被丢弃（聊天优先）
 - 服务端预算按身份 + `sessionId` 维护：说话间隔 10 分钟、每小时最多 4 次
 - `enqueue` / `cancel` / `locate` 对外开放，便于插件内其他能力主动入队；事件、指令、预算均为内存驻留，单进程有效
@@ -300,6 +304,10 @@ server {
 5. 防火墙为黑名单/全放行时不需要额外开端口；若开了系统防火墙或云厂商安全组，仍需放行该端口。
 
 ## 版本说明
+
+### v2.7
+- 对接 OpenAPI 2.2 与 BEHAVIOR_SEQUENCE.md：聊天响应新增 `sequenceVersion` / `sequence`（按动作+发言派生），`/suzu/action-result` 支持 `execution` 且允许同 ID 二次上报。
+- 主动同步支持 `environment` 屏幕资料与 `proactiveVisionInput`；主动命令新增 `sequence`，序列预算 4 动作/400 字/45 秒，`can_speak=false` 自动去掉发言；执行回执按 `spokenText` 才保存话语。
 
 ### v2.6
 - 按 COMPANION_EVENTS.md 实现主动陪伴协议 v1：新增 `POST /suzu/companion/sync`，`/suzu/health` 声明 `proactiveEvents`。

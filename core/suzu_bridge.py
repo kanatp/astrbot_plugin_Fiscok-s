@@ -34,6 +34,7 @@ from .api.persona_evolution_apis import evolve_persona
 from .api.personal_memory_apis import retrieve_memories
 from .api.provider_utils import resolve_provider
 from .api.topic_memory_apis import get_text_embedding, resolve_embedding_provider
+from .behavior_sequence import derive_sequence, fresh_environment, validate_execution
 from .companion_router import CompanionRouter
 from .suzu_settings import Live2DSettings
 from .prompts import (
@@ -627,16 +628,23 @@ class SuzuBridge:
             self._action_records.pop(key, None)
 
     def _remember_actions(
-        self, scope: str, request_id: str, actions: List[Dict[str, Any]]
+        self,
+        scope: str,
+        request_id: str,
+        actions: List[Dict[str, Any]],
+        sequence: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
-        """保存本轮下发的动作，供 /suzu/action-result 校验回执"""
+        """保存本轮下发的动作/序列，供 /suzu/action-result 校验回执"""
         now = time.monotonic()
         self._prune_action_records(now)
-        self._action_records[f"{scope}|{request_id}"] = {
+        record: Dict[str, Any] = {
             "at": now,
             "actions": [dict(item) for item in actions],
             "reported": False,
         }
+        if sequence:
+            record["sequence"] = [dict(item) for item in sequence]
+        self._action_records[f"{scope}|{request_id}"] = record
         while len(self._action_records) > RECEIPT_MAX:
             self._action_records.popitem(last=False)
 
@@ -721,6 +729,13 @@ class SuzuBridge:
             return False
         return any(self._provider_supports_image(item) for item in providers)
 
+    def _proactive_vision_available(self) -> bool:
+        """主动路由真的会把截图交给选定的 Provider 时才声明 proactiveVisionInput"""
+        if not self.vision_input:
+            return False
+        provider = self._proactive_provider()
+        return provider is not None and self._provider_supports_image(provider)
+
     def _success_response(
         self,
         *,
@@ -743,22 +758,32 @@ class SuzuBridge:
             str(live2d.get("expression", "")),
             str(live2d.get("motion", "")),
         )
+        # 桌面端声明行为序列时，服务端把动作与发言排成"先动作后发言"的计划；
+        # 存在 sequence 时它就是唯一执行计划，reply/actions 仅作兼容。
+        sequence = derive_sequence(actions, reply, capabilities)
         if request_id:
-            self._remember_actions(scope, request_id, actions)
-        return _json(
-            {
-                "ok": True,
-                "protocolVersion": PROTOCOL_VERSION,
-                "requestId": request_id,
-                "reply": reply,
-                "emotion": emotion,
-                "affinity": affinity,
-                "visionUsed": bool(vision_used),
-                "actions": actions,
-                "warnings": list(warnings),
-                "live2d": live2d,
-            }
-        )
+            self._remember_actions(scope, request_id, actions, sequence)
+        body: Dict[str, Any] = {
+            "ok": True,
+            "protocolVersion": PROTOCOL_VERSION,
+            "requestId": request_id,
+            "reply": reply,
+            "emotion": emotion,
+            "affinity": affinity,
+            "visionUsed": bool(vision_used),
+            "actions": actions,
+            "warnings": list(warnings),
+            "live2d": live2d,
+        }
+        if sequence:
+            body.update(sequenceVersion=1, sequence=sequence)
+            body["live2d"]["supports"] = [
+                "expression",
+                "motion",
+                "segments",
+                "behaviorSequence",
+            ]
+        return _json(body)
 
     # ---------------- 路由 ----------------
 
@@ -772,6 +797,7 @@ class SuzuBridge:
                 "protocolVersion": PROTOCOL_VERSION,
                 "features": {
                     "visionInput": self._vision_provider_available(),
+                    "proactiveVisionInput": self._proactive_vision_available(),
                     "structuredActions": True,
                     "actionReceipts": True,
                     "proactiveEvents": True,
@@ -1132,19 +1158,14 @@ class SuzuBridge:
                 404,
                 "NOT_FOUND",
             )
-        if record.get("reported"):
-            return _error("该请求的动作回执已记录，忽略重复上报", 409, "DUPLICATE_RECEIPT")
-
         actions = list(record.get("actions") or [])
-        allowed_types = {
-            "motion",
-            "intent",
-            "expression",
-            "pose",
-            "attention",
-            "interrupt",
-            "reset",
-        }
+        sequence = list(record.get("sequence") or [])
+        # 序列模式下 index 是原始步骤下标；只允许回报 action 步骤。
+        expected = (
+            [step.get("type") for step in sequence]
+            if sequence
+            else [action.get("type") for action in actions]
+        )
         normalized: List[Dict[str, Any]] = []
         for item in results:
             if not isinstance(item, dict):
@@ -1153,14 +1174,20 @@ class SuzuBridge:
             if not isinstance(index, int) or isinstance(index, bool) or index < 0:
                 return _error("回执 index 必须为非负整数", 400, "INVALID_RECEIPT")
             action_type = str(item.get("type") or "")
-            if action_type not in allowed_types:
+            if action_type not in ("motion", "intent", "expression", "pose", "attention"):
                 return _error(f"未知的动作类型 {action_type}", 400, "INVALID_RECEIPT")
             status = str(item.get("status") or "")
             if status not in ("accepted", "rejected"):
                 return _error(
                     "回执 status 必须为 accepted/rejected", 400, "INVALID_RECEIPT"
                 )
-            if index >= len(actions) or str(actions[index].get("type")) != action_type:
+            if sequence:
+                step = sequence[index] if index < len(sequence) else None
+                if step is None or step.get("type") != "action":
+                    return _error("回执 index 与序列步骤不匹配", 400, "INVALID_RECEIPT")
+                if str(step.get("action", {}).get("type")) != action_type:
+                    return _error("回执 type 与序列动作不匹配", 400, "INVALID_RECEIPT")
+            elif index >= len(expected) or expected[index] != action_type:
                 return _error(
                     "回执 index/type 与已下发的动作不匹配", 400, "INVALID_RECEIPT"
                 )
@@ -1173,12 +1200,21 @@ class SuzuBridge:
                 }
             )
 
+        # 序列允许"先 accepted 再带 execution 的同 ID 上报"，不能按 ID 丢弃后一次。
+        execution = payload.get("execution")
+        if execution is not None and sequence:
+            try:
+                record["execution"] = validate_execution(execution, sequence)
+            except ValueError as exc:
+                return _error(str(exc), 400, "INVALID_RECEIPT")
+
         record["reported"] = True
         record["executedAt"] = executed_at
         record["results"] = normalized
         logger.info(
             f"[Fiscok's][suzu] 收到动作回执 "
-            f"(requestId={request_id}, 条数={len(normalized)})"
+            f"(requestId={request_id}, 条数={len(normalized)}, "
+            f"execution={'有' if record.get('execution') else '无'})"
         )
         return _json({"ok": True})
 
@@ -1190,13 +1226,17 @@ class SuzuBridge:
         if not payload:
             return _error("请求体必须为 JSON 对象", 400, "INVALID_INPUT")
         identity = self.memory_user_id
+        provider = self._proactive_provider()
         try:
             response = await self.companion_router.sync(
                 payload,
                 authenticated_identity=identity,
-                provider=self._proactive_provider(),
+                provider=provider,
                 system_prompt=await self._proactive_system_prompt(),
                 contexts=[],
+                image_urls=await self._companion_images(
+                    payload.get("environment"), provider
+                ),
                 save_proactive=self._save_proactive,
             )
         except ValueError as exc:
@@ -1230,6 +1270,47 @@ class SuzuBridge:
         except Exception as exc:
             logger.warning(f"[Fiscok's][suzu] 获取默认 Provider 失败: {exc}")
             return None
+
+    async def _companion_images(
+        self, environment: Any, provider: Any
+    ) -> List[str]:
+        """主动模式只把通过时效/JPEG/base64 校验的截图交给支持图片的 Provider。"""
+        if not self.vision_input or provider is None:
+            return []
+        if not self._provider_supports_image(provider):
+            return []
+        now_ms = int(time.time() * 1000)
+        if fresh_environment(environment, now_ms) is None:
+            return []
+        image = environment.get("image") if isinstance(environment, dict) else None
+        if not isinstance(image, dict) or str(image.get("mimeType") or "") != "image/jpeg":
+            return []
+        data = image.get("dataBase64")
+        if not isinstance(data, str) or len(data) > MAX_IMAGE_BASE64:
+            return []
+        captured_at = image.get("capturedAt")
+        if (
+            not isinstance(captured_at, (int, float))
+            or isinstance(captured_at, bool)
+            or not -5000 <= now_ms - captured_at <= 60000
+        ):
+            return []
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            return []
+        if (
+            len(raw) > 5 * 1024 * 1024
+            or not raw.startswith(b"\xff\xd8")
+            or not raw.endswith(b"\xff\xd9")
+        ):
+            return []
+        try:
+            path = await Image.fromBase64(data).convert_to_file_path()
+        except Exception as exc:
+            logger.warning(f"[Fiscok's][suzu] 主动模式截图转存失败: {exc}")
+            return []
+        return [path] if path else []
 
     async def _proactive_system_prompt(self) -> str:
         """主动话语使用与人设一致的基线与当前情绪，缓存一分钟。"""
