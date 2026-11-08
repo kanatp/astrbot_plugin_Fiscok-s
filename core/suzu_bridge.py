@@ -34,6 +34,7 @@ from .api.persona_evolution_apis import evolve_persona
 from .api.personal_memory_apis import retrieve_memories
 from .api.provider_utils import resolve_provider
 from .api.topic_memory_apis import get_text_embedding, resolve_embedding_provider
+from .companion_router import CompanionRouter
 from .suzu_settings import Live2DSettings
 from .prompts import (
     format_emotion_state_injection,
@@ -136,6 +137,11 @@ class SuzuBridge:
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._recent_requests: "OrderedDict[str, float]" = OrderedDict()
         self._action_records: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        # 主动陪伴：事件去重、指令队列、预算与主动话语幂等记录（内存驻留）
+        self.companion_router = CompanionRouter(log=logger.info)
+        self.last_companion_instance: Dict[str, str] = {}
+        self._saved_proactive: "OrderedDict[str, float]" = OrderedDict()
+        self._proactive_prompt_cache: tuple = ("", 0.0)
         # 插件 WebUI（密码会话）；初始化失败时降级为纯桥接，不影响桌面端使用。
         self.webui = None
         try:
@@ -247,6 +253,7 @@ class SuzuBridge:
         app.router.add_get("/suzu/bootstrap", self._bootstrap)
         app.router.add_post("/suzu/chat", self._chat)
         app.router.add_post("/suzu/action-result", self._action_result)
+        app.router.add_post("/suzu/companion/sync", self._companion_sync)
         app.router.add_get("/suzu/memory", self._memory)
         app.router.add_post("/suzu/memory/note", self._memory_note)
         app.router.add_post("/suzu/persona/evolve", self._persona_evolve)
@@ -767,6 +774,7 @@ class SuzuBridge:
                     "visionInput": self._vision_provider_available(),
                     "structuredActions": True,
                     "actionReceipts": True,
+                    "proactiveEvents": True,
                 },
                 "time": _iso_now(),
             }
@@ -894,6 +902,10 @@ class SuzuBridge:
             return _error(
                 "重复的 requestId，已忽略本次请求", 409, "DUPLICATE_REQUEST"
             )
+
+        # 用户聊天优先：丢弃该会话尚未下发的主动指令
+        if session_id:
+            self.companion_router.drop_pending(self.memory_user_id, session_id)
 
         async with self._session_lock(scope):
             if self.chat_mode == "astrbot":
@@ -1124,7 +1136,15 @@ class SuzuBridge:
             return _error("该请求的动作回执已记录，忽略重复上报", 409, "DUPLICATE_RECEIPT")
 
         actions = list(record.get("actions") or [])
-        allowed_types = {"motion", "intent", "expression", "pose", "interrupt", "reset"}
+        allowed_types = {
+            "motion",
+            "intent",
+            "expression",
+            "pose",
+            "attention",
+            "interrupt",
+            "reset",
+        }
         normalized: List[Dict[str, Any]] = []
         for item in results:
             if not isinstance(item, dict):
@@ -1161,6 +1181,114 @@ class SuzuBridge:
             f"(requestId={request_id}, 条数={len(normalized)})"
         )
         return _json({"ok": True})
+
+    # ---------------- 主动陪伴 ----------------
+
+    async def _companion_sync(self, request: web.Request) -> web.Response:
+        """桌面端定时上行事件/回执，本端按策略下发主动指令。"""
+        payload = await _read_json(request)
+        if not payload:
+            return _error("请求体必须为 JSON 对象", 400, "INVALID_INPUT")
+        identity = self.memory_user_id
+        try:
+            response = await self.companion_router.sync(
+                payload,
+                authenticated_identity=identity,
+                provider=self._proactive_provider(),
+                system_prompt=await self._proactive_system_prompt(),
+                contexts=[],
+                save_proactive=self._save_proactive,
+            )
+        except ValueError as exc:
+            return _error(str(exc), 400, "INVALID_INPUT")
+        except Exception as exc:
+            logger.error(f"[Fiscok's][suzu] 主动陪伴同步失败: {exc}", exc_info=True)
+            return _error("主动陪伴同步失败", 502, "UPSTREAM_UNAVAILABLE")
+
+        session_id = payload.get("sessionId")
+        instance_id = payload.get("instanceId")
+        if isinstance(session_id, str) and isinstance(instance_id, str):
+            self.last_client.update(
+                {"sessionId": session_id, "instanceId": instance_id}
+            )
+            self.last_companion_instance = {
+                "sessionId": session_id,
+                "instanceId": instance_id,
+            }
+        return _json(response)
+
+    def _proactive_provider(self) -> Any:
+        """主动决策复用桌面聊天 Provider；没有就不调用模型，只做轻动作。"""
+        try:
+            provider = resolve_provider(self.plugin.context, self.llm_provider_id)
+            if provider is not None:
+                return provider
+        except Exception as exc:
+            logger.warning(f"[Fiscok's][suzu] 主动陪伴 Provider 解析失败: {exc}")
+        try:
+            return self.plugin.context.get_using_provider(self._umo(self.memory_user_id))
+        except Exception as exc:
+            logger.warning(f"[Fiscok's][suzu] 获取默认 Provider 失败: {exc}")
+            return None
+
+    async def _proactive_system_prompt(self) -> str:
+        """主动话语使用与人设一致的基线与当前情绪，缓存一分钟。"""
+        now = time.monotonic()
+        cached_text, cached_at = self._proactive_prompt_cache
+        if cached_text and now - cached_at < 60.0:
+            return cached_text
+        umo = self._umo(self.memory_user_id)
+        try:
+            baseline = await self._baseline_persona(self.memory_user_id, umo)
+        except Exception as exc:
+            logger.warning(f"[Fiscok's][suzu] 读取主动陪伴人设失败: {exc}")
+            baseline = {"name": "", "prompt": ""}
+        parts: List[str] = []
+        if baseline["prompt"]:
+            parts.append(baseline["prompt"])
+        emotion_cfg = self.plugin.config.get("emotion_config", {}) or {}
+        if emotion_cfg.get("available", False) and self.plugin.current_emotion:
+            affinity = self.plugin.data_manager.get_user_affinity(
+                self.memory_user_id, self.default_nickname
+            )
+            parts.append(
+                format_emotion_state_injection(
+                    self.default_nickname, str(self.plugin.current_emotion), affinity
+                )
+            )
+        prompt = "\n\n".join(parts)
+        self._proactive_prompt_cache = (prompt, now)
+        return prompt
+
+    async def _save_proactive(self, scope: str, command_id: str, text: str) -> None:
+        """把已接受的主动话语写回 AstrBot 同一会话历史，按 command_id 幂等。"""
+        text = _clip(text, 400)
+        if not text or command_id in self._saved_proactive:
+            return
+        self._saved_proactive[command_id] = time.monotonic()
+        while len(self._saved_proactive) > RECEIPT_MAX:
+            self._saved_proactive.popitem(last=False)
+
+        platform_id, _, _ = self._pipeline_target()
+        umo = f"{platform_id}:FriendMessage:{self.memory_user_id}"
+        try:
+            manager = self.plugin.context.conversation_manager
+            conversation_id = await manager.get_curr_conversation_id(umo)
+            if not conversation_id:
+                # 还没有会话时不凭空创建，避免污染一条空对话。
+                return
+            conversation = await manager.get_conversation(umo, conversation_id)
+            if conversation is None:
+                return
+            history = json.loads(conversation.history) if conversation.history else []
+            if not isinstance(history, list):
+                history = []
+            history.append(
+                {"role": "assistant", "content": text, "timestamp": int(time.time())}
+            )
+            await manager.update_conversation(umo, conversation_id, history=history)
+        except Exception as exc:
+            logger.warning(f"[Fiscok's][suzu] 保存主动话语失败: {exc}")
 
     async def _memory_note(self, request: web.Request) -> web.Response:
         payload = await _read_json(request)

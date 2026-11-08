@@ -160,7 +160,7 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 
 开启 `suzu_bridge_config.available` 后，插件会额外启动一个独立的 aiohttp 服务（与 AstrBot 面板端口无关），供桌面端模型读取人设、记忆并把聊天交给 AstrBot（默认走主 Agent 管线，也可切换为插件直连 Provider）：
 
-- 接口：`GET /suzu/health`、`GET /suzu/bootstrap`、`POST /suzu/chat`、`POST /suzu/action-result`、`GET /suzu/memory`、`POST /suzu/memory/note`、`POST /suzu/persona/evolve`
+- 接口：`GET /suzu/health`、`GET /suzu/bootstrap`、`POST /suzu/chat`、`POST /suzu/action-result`、`POST /suzu/companion/sync`、`GET /suzu/memory`、`POST /suzu/memory/note`、`POST /suzu/persona/evolve`
 - 鉴权：除 `/suzu/health` 外都需要 `Authorization: Bearer <token>`；未配置 token 且未配置白名单时，`/suzu` 接口只接受本机请求（WebUI 有独立的密码会话，仍可远程访问）
 - 来源限制：`allowed_ips` 支持 CIDR 白名单（留空不限制）；`trusted_proxies` 决定哪些地址发来的 `X-Forwarded-For` / `X-Real-IP` 会被采信，防止客户端伪造来源绕过白名单
 - 桌面端默认用 `default_user_id`（默认 `desktop_suzu`）保存个人记忆与好感度；在 WebUI 的 Live2D 标签页填「绑定 QQ 号」后，桌面端改为直接读写该 QQ 账号的个人长期记忆与好感度，和私聊完全一致（只输数字，留空即不绑定）
@@ -181,6 +181,20 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 - 图片输入默认开启，可在 WebUI 的 Live2D 标签页「允许图片输入」关闭；关闭或 Provider 不支持图片时会在 `warnings` 说明，并令 `visionUsed=false`
 - `POST /suzu/action-result` 接收动作执行回执，按身份 + `sessionId` + `requestId` 校验下标与类型，五分钟内只接受一次，未知请求返回 404
 - `actions` 只会包含客户端 `capabilities` 里声明过的 `motion` / `expression`，未声明的不下发
+
+#### 主动陪伴（主动协议 v1）
+
+桥接按 `erdi_pet/docs/COMPANION_EVENTS.md` 实现了主动陪伴，与聊天 v2 并存：
+
+- `GET /suzu/health` 声明 `features.proactiveEvents=true`，桌面端据此启用出站同步
+- `POST /suzu/companion/sync` 接收 `events` / `receipts` / `state` / `capabilities`，返回 `ackEventIds`、`ackReceiptIds` 与最多 8 条待执行 `commands`；`requestId` 原样回传
+- 事件按 `id` 去重（每实例最多 512 条），只对 30 秒内的新事件决策；同类型两秒限频由桌面端负责
+- 默认策略：停留/悬停优先安静看向鼠标（10 秒注意力冷却），点击、输入恢复、启动、机会事件选择看向前方 + 微笑 + 点头/轻微摆动（45 秒动作冷却）
+- 只有启动、输入恢复、机会事件且预算允许时才调用 Provider 生成一句不超过 160 字的关心，6 秒超时或输出不合法就保持安静，不编造问候
+- 主动话语在收到 `accepted` 回执后写回 AstrBot 同一会话历史（按 `commandId` 幂等），不会伪造用户消息
+- `kind=cancel` 可取消本实例尚未回执的指令；用户发起聊天时，该会话所有未下发的主动指令会被丢弃（聊天优先）
+- 服务端预算按身份 + `sessionId` 维护：说话间隔 10 分钟、每小时最多 4 次
+- `enqueue` / `cancel` / `locate` 对外开放，便于插件内其他能力主动入队；事件、指令、预算均为内存驻留，单进程有效
 
 #### LLM 对 Live2D 的控制范围
 
@@ -286,6 +300,12 @@ server {
 5. 防火墙为黑名单/全放行时不需要额外开端口；若开了系统防火墙或云厂商安全组，仍需放行该端口。
 
 ## 版本说明
+
+### v2.6
+- 按 COMPANION_EVENTS.md 实现主动陪伴协议 v1：新增 `POST /suzu/companion/sync`，`/suzu/health` 声明 `proactiveEvents`。
+- 支持事件去重、按实例排队、默认轻动作（注视/微笑/点头）、Provider 主动话语（6 秒超时保持安静）、执行回执与 `cancel`。
+- 主动话语按 `commandId` 幂等写回 AstrBot 会话历史；用户聊天优先，会丢弃该会话未下发的主动指令。
+- `actions` 与回执新增 `attention` 类型。
 
 ### v2.5
 - 桌面桥接升级到 v2 协议：`/suzu/health` 声明协议版本与能力；`/suzu/chat` 支持 `requestId` 去重（409 `DUPLICATE_REQUEST`）、同会话串行、`capabilities` 白名单动作、`visionUsed` 与 `warnings`；新增 `POST /suzu/action-result` 动作回执（五分钟有效、只接受一次）。
