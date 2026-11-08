@@ -10,7 +10,7 @@ import uuid
 from typing import List
 
 from astrbot.api import logger
-from astrbot.core.message.components import Plain
+from astrbot.core.message.components import Image, Plain
 from astrbot.core.platform import (
     AstrBotMessage,
     MessageMember,
@@ -37,6 +37,7 @@ def _build_message(
     nickname: str,
     self_id: str,
     request_id: str,
+    image_base64: str = "",
 ) -> AstrBotMessage:
     """构造一条私聊消息对象（字段必须填齐，事件构造时会读取发送者与消息概要）"""
     message = AstrBotMessage()
@@ -47,6 +48,8 @@ def _build_message(
     message.sender = MessageMember(str(user_id), nickname)
     message.message_str = text
     message.message = [Plain(text)]
+    if image_base64:
+        message.message.append(Image.fromBase64(image_base64))
     message.raw_message = {
         "post_type": "message",
         "message_type": "private",
@@ -66,17 +69,20 @@ async def chat_via_astrbot(
     platform_name: str,
     self_id: str = "",
     environment: str = "",
+    image_base64: str = "",
     first_timeout: float = 90.0,
     idle_timeout: float = 10.0,
-) -> str:
-    """注入一条事件并等待管线回包，返回最终文本。
+) -> tuple:
+    """注入一条事件并等待管线回包，返回 (最终文本, 是否携带图片)。
 
     platform_id 决定 umo 的第一段，传入真实 QQ 平台实例 id 且 user_id 为绑定 QQ 时，
     umo 与 QQ 私聊会话完全一致，配置、人格、历史与钩子全部对齐。
     platform_name 固定用注入名，避免被当成 QQ 消息做合并转发等额外装饰。
     """
     request_id = f"suzu-{uuid.uuid4()}"
-    message = _build_message(text, user_id, nickname, self_id or "0", request_id)
+    message = _build_message(
+        text, user_id, nickname, self_id or "0", request_id, image_base64
+    )
     platform_meta = PlatformMetadata(
         name=platform_name,
         description="Live2D 桌面端",
@@ -147,6 +153,7 @@ async def chat_via_astrbot(
         )
     logger.debug(
         f"[Fiscok's][suzu] 管线回复完成 "
-        f"(umo={platform_id}:FriendMessage:{user_id}, 字符数={len(reply)})"
+        f"(umo={platform_id}:FriendMessage:{user_id}, 字符数={len(reply)}, "
+        f"图片={'有' if image_base64 else '无'})"
     )
-    return reply
+    return reply, bool(image_base64)

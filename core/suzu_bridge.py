@@ -6,14 +6,20 @@
 - 以 AstrBot 事件管线完成桌面端聊天（默认），也可选插件直连 Provider
 - 桌面端笔记写入个人长期记忆
 - 手动触发一次人设演化
+- 按 v2 桌面协议返回结构化动作与动作回执
 
 只依赖 aiohttp（AstrBot 自带），不改动 QQ 侧任何行为。
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hmac
 import json
+import re
+import time
+from collections import OrderedDict
 from datetime import datetime
 from ipaddress import ip_address, ip_network
 from typing import Any, Dict, List, Optional
@@ -21,6 +27,7 @@ from typing import Any, Dict, List, Optional
 from aiohttp import web
 
 from astrbot.api import logger
+from astrbot.api.message_components import Image
 
 from .api.pipeline_chat_apis import chat_via_astrbot
 from .api.persona_evolution_apis import evolve_persona
@@ -34,10 +41,19 @@ from .prompts import (
     format_personal_memory_injection,
 )
 
-BRIDGE_VERSION = 1
+PROTOCOL_VERSION = 2
+BRIDGE_VERSION = 2
 BRIDGE_PLUGIN = "astrbot_plugin_Fiscok"
 MAX_HISTORY = 12
+MAX_TEXT = 8000
+MAX_IMAGE_BASE64 = 7_000_000
+RECEIPT_TTL = 300.0
+RECEIPT_MAX = 64
 CHAT_TIMEOUT = 60.0
+PIPELINE_FIRST_TIMEOUT = 65.0
+
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_/-]{1,100}$")
 
 
 def _dumps(value: Any) -> str:
@@ -48,8 +64,11 @@ def _json(data: Any, status: int = 200) -> web.Response:
     return web.json_response(data, status=status, dumps=_dumps)
 
 
-def _error(message: str, status: int = 400) -> web.Response:
-    return _json({"ok": False, "error": message}, status=status)
+def _error(message: str, status: int = 400, code: str = "") -> web.Response:
+    body: Dict[str, Any] = {"ok": False, "error": message}
+    if code:
+        body["code"] = code
+    return _json(body, status=status)
 
 
 def _iso_now() -> str:
@@ -113,6 +132,10 @@ class SuzuBridge:
         self.last_chat_at: str = ""
         self.request_count = 0
         self.reject_count = 0
+        # v2 协议：同会话串行、requestId 去重、动作回执（均为内存驻留）
+        self._session_locks: Dict[str, asyncio.Lock] = {}
+        self._recent_requests: "OrderedDict[str, float]" = OrderedDict()
+        self._action_records: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         # 插件 WebUI（密码会话）；初始化失败时降级为纯桥接，不影响桌面端使用。
         self.webui = None
         try:
@@ -134,6 +157,7 @@ class SuzuBridge:
         self.llm_provider_id = str(data.get("llm_provider_id") or "").strip()
         # astrbot：把消息注入 AstrBot 事件队列，复用主 Agent 管线；direct：插件直连 Provider。
         self.chat_mode = "direct" if data.get("chat_mode") == "direct" else "astrbot"
+        self.vision_input = bool(data.get("vision_input", True))
         self.allowed_networks = _parse_networks(data.get("allowed_ips") or [])
         self.trusted_networks = _parse_networks(
             data.get("trusted_proxies") or ["127.0.0.1", "::1"]
@@ -214,10 +238,15 @@ class SuzuBridge:
         elif not self.token:
             logger.warning("[Fiscok's][suzu] 未配置访问令牌，仅靠 IP 白名单防护")
 
-        app = web.Application(middlewares=[self._auth_middleware])
+        app = web.Application(
+            middlewares=[self._auth_middleware],
+            # 桌面端截图以 base64 上传，默认 1MiB 不够
+            client_max_size=9 * 1024 * 1024,
+        )
         app.router.add_get("/suzu/health", self._health)
         app.router.add_get("/suzu/bootstrap", self._bootstrap)
         app.router.add_post("/suzu/chat", self._chat)
+        app.router.add_post("/suzu/action-result", self._action_result)
         app.router.add_get("/suzu/memory", self._memory)
         app.router.add_post("/suzu/memory/note", self._memory_note)
         app.router.add_post("/suzu/persona/evolve", self._persona_evolve)
@@ -547,15 +576,198 @@ class SuzuBridge:
         )
         return memories[:limit]
 
+    # ---------------- v2 协议辅助 ----------------
+
+    def _scope_key(self, session_id: str) -> str:
+        """认证身份 + 会话；没有 sessionId 的旧客户端按身份整体串行"""
+        return f"{self.memory_user_id}/{session_id or 'default'}"
+
+    def _session_lock(self, scope: str) -> asyncio.Lock:
+        lock = self._session_locks.get(scope)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[scope] = lock
+        return lock
+
+    def _prune_requests(self, now: float) -> None:
+        expired = [
+            key
+            for key, at in self._recent_requests.items()
+            if now - float(at) > RECEIPT_TTL
+        ]
+        for key in expired:
+            self._recent_requests.pop(key, None)
+
+    def _seen_request(self, scope: str, request_id: str) -> bool:
+        """首次出现返回 False 并记录；五分钟内重复出现返回 True"""
+        now = time.monotonic()
+        self._prune_requests(now)
+        key = f"{scope}|{request_id}"
+        if key in self._recent_requests:
+            return True
+        self._recent_requests[key] = now
+        while len(self._recent_requests) > RECEIPT_MAX:
+            self._recent_requests.popitem(last=False)
+        return False
+
+    def _prune_action_records(self, now: float) -> None:
+        expired = [
+            key
+            for key, record in self._action_records.items()
+            if now - float(record.get("at", 0)) > RECEIPT_TTL
+        ]
+        for key in expired:
+            self._action_records.pop(key, None)
+
+    def _remember_actions(
+        self, scope: str, request_id: str, actions: List[Dict[str, Any]]
+    ) -> None:
+        """保存本轮下发的动作，供 /suzu/action-result 校验回执"""
+        now = time.monotonic()
+        self._prune_action_records(now)
+        self._action_records[f"{scope}|{request_id}"] = {
+            "at": now,
+            "actions": [dict(item) for item in actions],
+            "reported": False,
+        }
+        while len(self._action_records) > RECEIPT_MAX:
+            self._action_records.popitem(last=False)
+
+    def _action_record(self, scope: str, request_id: str) -> Optional[Dict[str, Any]]:
+        key = f"{scope}|{request_id}"
+        record = self._action_records.get(key)
+        if record is None:
+            return None
+        if time.monotonic() - float(record.get("at", 0)) > RECEIPT_TTL:
+            self._action_records.pop(key, None)
+            return None
+        return record
+
+    def _environment_summary(self, environment: Any) -> str:
+        """把桌面环境整理成一段可注入系统提示词的简要描述"""
+        if not isinstance(environment, dict):
+            return ""
+        parts: List[str] = []
+        summary = _clip(environment.get("summary"), 300)
+        if summary:
+            parts.append(summary)
+        window = environment.get("window")
+        if isinstance(window, dict):
+            app = _clip(window.get("app"), 80)
+            title = _clip(window.get("title"), 120)
+            if app or title:
+                parts.append(f"当前窗口：{app}{(' · ' + title) if title else ''}")
+        text = _clip(environment.get("text"), 400)
+        if text:
+            parts.append(f"窗口文字：{text}")
+        return "\n".join(parts)
+
+    def _parse_image(self, environment: Any) -> tuple:
+        """返回 (base64 字符串, 警告列表)；未开启图片输入或图片不合法时返回空串"""
+        warnings: List[str] = []
+        if not isinstance(environment, dict):
+            return "", warnings
+        image = environment.get("image")
+        if not isinstance(image, dict):
+            return "", warnings
+        if not self.vision_input:
+            warnings.append("桥接已关闭图片输入，本轮忽略桌面截图")
+            return "", warnings
+        mime = str(image.get("mimeType") or "image/jpeg").strip().lower()
+        if mime not in ("image/jpeg", "image/png"):
+            warnings.append(f"不支持的图片类型 {mime}，已忽略")
+            return "", warnings
+        data = image.get("dataBase64")
+        if not isinstance(data, str) or not data.strip():
+            warnings.append("图片缺少 dataBase64，已忽略")
+            return "", warnings
+        data = data.strip()
+        if len(data) > MAX_IMAGE_BASE64:
+            warnings.append("图片超过 7MB 上限，已忽略")
+            return "", warnings
+        try:
+            base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            warnings.append("图片 base64 不合法，已忽略")
+            return "", warnings
+        return data, warnings
+
+    @staticmethod
+    def _provider_supports_image(provider: Any) -> bool:
+        try:
+            modalities = provider.provider_config.get("modalities", None)
+        except Exception:
+            return False
+        if modalities == []:
+            # 迁移遗留的空列表按“未配置”处理，视为支持
+            return True
+        return isinstance(modalities, list) and "image" in modalities
+
+    def _vision_provider_available(self) -> bool:
+        """是否真的接通了支持图片的 Provider（用于 health.features.visionInput）"""
+        if not self.vision_input:
+            return False
+        try:
+            providers = list(self.plugin.context.get_all_providers() or [])
+        except Exception as exc:
+            logger.warning(f"[Fiscok's][suzu] 读取 Provider 列表失败: {exc}")
+            return False
+        return any(self._provider_supports_image(item) for item in providers)
+
+    def _success_response(
+        self,
+        *,
+        request_id: str,
+        scope: str,
+        reply: str,
+        user_id: str,
+        nickname: str,
+        vision_used: bool,
+        warnings: List[str],
+        capabilities: Dict[str, Any],
+    ) -> web.Response:
+        """统一构造 v2 成功响应，同时保留旧版 live2d 字段"""
+        reply = _clip(reply, 12000)
+        emotion = str(self.plugin.current_emotion or "")
+        affinity = self.plugin.data_manager.get_user_affinity(user_id, nickname)
+        live2d = self.settings.build_live2d_control(emotion, affinity, reply)
+        actions = self.settings.build_actions(
+            capabilities,
+            str(live2d.get("expression", "")),
+            str(live2d.get("motion", "")),
+        )
+        if request_id:
+            self._remember_actions(scope, request_id, actions)
+        return _json(
+            {
+                "ok": True,
+                "protocolVersion": PROTOCOL_VERSION,
+                "requestId": request_id,
+                "reply": reply,
+                "emotion": emotion,
+                "affinity": affinity,
+                "visionUsed": bool(vision_used),
+                "actions": actions,
+                "warnings": list(warnings),
+                "live2d": live2d,
+            }
+        )
+
     # ---------------- 路由 ----------------
 
     async def _health(self, request: web.Request) -> web.Response:
         return _json(
             {
                 "ok": True,
-                "plugin": BRIDGE_PLUGIN,
                 "bridge": "suzu",
+                "plugin": BRIDGE_PLUGIN,
                 "version": BRIDGE_VERSION,
+                "protocolVersion": PROTOCOL_VERSION,
+                "features": {
+                    "visionInput": self._vision_provider_available(),
+                    "structuredActions": True,
+                    "actionReceipts": True,
+                },
                 "time": _iso_now(),
             }
         )
@@ -643,28 +855,91 @@ class SuzuBridge:
 
     async def _chat(self, request: web.Request) -> web.Response:
         payload = await _read_json(request)
-        text = _clip(payload.get("text"), 8000)
+
+        protocol = payload.get("protocolVersion")
+        if protocol is not None and protocol != PROTOCOL_VERSION:
+            return _error(
+                f"不支持的 protocolVersion: {protocol}", 400, "PROTOCOL_ERROR"
+            )
+
+        text = _clip(payload.get("text"), MAX_TEXT)
         if not text:
-            return _error("缺少 text")
+            return _error("缺少 text", 400, "INVALID_INPUT")
+
+        request_id = str(payload.get("requestId") or "").strip()
+        if request_id and not _REQUEST_ID_RE.match(request_id):
+            return _error(
+                "requestId 必须为 8-80 位字母、数字、下划线或连字符",
+                400,
+                "INVALID_INPUT",
+            )
+        session_id = str(payload.get("sessionId") or "").strip()
+        if session_id and not _SESSION_ID_RE.match(session_id):
+            return _error("sessionId 格式不合法", 400, "INVALID_INPUT")
 
         user_id = self._user_id(payload.get("user_id"))
         nickname = self._nickname(payload.get("nickname"))
-        if self.chat_mode == "astrbot":
-            return await self._chat_via_pipeline(payload, text, user_id, nickname)
-        return await self._chat_direct(payload, text, user_id, nickname)
+        capabilities = (
+            payload.get("capabilities")
+            if isinstance(payload.get("capabilities"), dict)
+            else {}
+        )
+        environment = payload.get("environment")
+        environment_summary = self._environment_summary(environment)
+        image_base64, warnings = self._parse_image(environment)
+
+        # 同一身份 + 会话串行；requestId 五分钟内只处理一次，重复请求直接拒绝。
+        scope = self._scope_key(session_id)
+        if request_id and self._seen_request(scope, request_id):
+            return _error(
+                "重复的 requestId，已忽略本次请求", 409, "DUPLICATE_REQUEST"
+            )
+
+        async with self._session_lock(scope):
+            if self.chat_mode == "astrbot":
+                return await self._chat_via_pipeline(
+                    payload,
+                    text,
+                    user_id,
+                    nickname,
+                    environment_summary,
+                    image_base64,
+                    warnings,
+                    capabilities,
+                    request_id,
+                    scope,
+                )
+            return await self._chat_direct(
+                payload,
+                text,
+                user_id,
+                nickname,
+                environment_summary,
+                image_base64,
+                warnings,
+                capabilities,
+                request_id,
+                scope,
+            )
 
     async def _chat_via_pipeline(
-        self, payload: Dict[str, Any], text: str, user_id: str, nickname: str
+        self,
+        payload: Dict[str, Any],
+        text: str,
+        user_id: str,
+        nickname: str,
+        environment_summary: str,
+        image_base64: str,
+        warnings: List[str],
+        capabilities: Dict[str, Any],
+        request_id: str,
+        scope: str,
     ) -> web.Response:
         """把桌面消息注入 AstrBot 事件队列，由主 Agent 管线完成后收回文本。"""
         platform_id, platform_name, self_id = self._pipeline_target()
-        environment = payload.get("environment") or {}
-        summary = ""
-        if isinstance(environment, dict):
-            summary = _clip(environment.get("summary"), 300)
 
         try:
-            reply = await chat_via_astrbot(
+            reply, image_sent = await chat_via_astrbot(
                 self.plugin.context,
                 text=text,
                 user_id=user_id,
@@ -672,36 +947,51 @@ class SuzuBridge:
                 platform_id=platform_id,
                 platform_name=platform_name,
                 self_id=self_id,
-                environment=summary,
+                environment=environment_summary,
+                image_base64=image_base64,
+                first_timeout=PIPELINE_FIRST_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            return _error("模型响应超时", 504)
+            return _error("模型响应超时", 504, "TIMEOUT")
         except RuntimeError as exc:
-            return _error(str(exc), 504)
+            return _error(str(exc), 504, "TIMEOUT")
         except Exception as exc:
             logger.error(f"[Fiscok's][suzu] 桌面端管线聊天失败: {exc}", exc_info=True)
-            return _error(f"聊天失败: {exc}", 502)
+            return _error(f"聊天失败: {exc}", 502, "UPSTREAM_UNAVAILABLE")
+
+        vision_used = image_sent and self._vision_provider_available()
+        if image_sent and not vision_used:
+            warnings.append("没有声明图片能力的 Provider，截图仅作为文字描述参考")
 
         self.last_chat_at = _iso_now()
         # 管线里的插件钩子已经记录演化对话、调度情绪分析并累计计数，这里不再重复记录。
-        affinity = self.plugin.data_manager.get_user_affinity(user_id, nickname)
-        return _json(
-            {
-                "ok": True,
-                "reply": reply,
-                "emotion": str(self.plugin.current_emotion or ""),
-                "affinity": affinity,
-                "live2d": self.settings.build_live2d_control(
-                    str(self.plugin.current_emotion or ""), affinity, reply
-                ),
-            }
+        return self._success_response(
+            request_id=request_id,
+            scope=scope,
+            reply=reply,
+            user_id=user_id,
+            nickname=nickname,
+            vision_used=vision_used,
+            warnings=warnings,
+            capabilities=capabilities,
         )
 
     async def _chat_direct(
-        self, payload: Dict[str, Any], text: str, user_id: str, nickname: str
+        self,
+        payload: Dict[str, Any],
+        text: str,
+        user_id: str,
+        nickname: str,
+        environment_summary: str,
+        image_base64: str,
+        warnings: List[str],
+        capabilities: Dict[str, Any],
+        request_id: str,
+        scope: str,
     ) -> web.Response:
         """插件直连 Provider 的旧链路，仅在使用本页配置的链路时启用。"""
         umo = self._umo(user_id)
+        vision_used = False
 
         try:
             baseline = await self._baseline_persona(user_id, umo)
@@ -740,33 +1030,47 @@ class SuzuBridge:
                 if injection:
                     system_parts.append(injection)
 
-            environment = payload.get("environment") or {}
-            if isinstance(environment, dict):
-                summary = _clip(environment.get("summary"), 300)
-                if summary:
-                    system_parts.append(f"<桌面环境>\n{summary}\n</桌面环境>")
+            if environment_summary:
+                system_parts.append(f"<桌面环境>\n{environment_summary}\n</桌面环境>")
 
             contexts = self._history_contexts(payload.get("history"))
             provider = resolve_provider(self.plugin.context, self.llm_provider_id)
             if provider is None:
-                return _error("AstrBot 没有可用的文本 Provider", 503)
+                return _error("AstrBot 没有可用的文本 Provider", 503, "NOT_CONFIGURED")
+
+            image_urls: List[str] = []
+            if image_base64:
+                if not self._provider_supports_image(provider):
+                    warnings.append("当前 Provider 未声明图片能力，已忽略截图")
+                else:
+                    try:
+                        path = await Image.fromBase64(
+                            image_base64
+                        ).convert_to_file_path()
+                    except Exception as exc:
+                        path = ""
+                        warnings.append(f"图片转存失败：{exc}")
+                    if path:
+                        image_urls = [path]
+                        vision_used = True
 
             response = await asyncio.wait_for(
                 provider.text_chat(
                     prompt=text,
                     contexts=contexts,
                     system_prompt="\n\n".join(system_parts),
+                    image_urls=image_urls or None,
                 ),
                 timeout=CHAT_TIMEOUT,
             )
             reply = _clip(getattr(response, "completion_text", ""), 4000)
             if not reply:
-                return _error("模型没有返回内容", 502)
+                return _error("模型没有返回内容", 502, "UPSTREAM_UNAVAILABLE")
         except asyncio.TimeoutError:
-            return _error("模型响应超时", 504)
+            return _error("模型响应超时", 504, "TIMEOUT")
         except Exception as exc:
             logger.error(f"[Fiscok's][suzu] 桌面端聊天失败: {exc}", exc_info=True)
-            return _error(f"聊天失败: {exc}", 502)
+            return _error(f"聊天失败: {exc}", 502, "UPSTREAM_UNAVAILABLE")
 
         self.last_chat_at = _iso_now()
         try:
@@ -774,17 +1078,89 @@ class SuzuBridge:
         except Exception as exc:
             logger.warning(f"[Fiscok's][suzu] 记录桌面对话/情绪失败: {exc}")
 
-        return _json(
-            {
-                "ok": True,
-                "reply": reply,
-                "emotion": str(self.plugin.current_emotion or ""),
-                "affinity": affinity,
-                "live2d": self.settings.build_live2d_control(
-                    str(self.plugin.current_emotion or ""), affinity, reply
-                ),
-            }
+        return self._success_response(
+            request_id=request_id,
+            scope=scope,
+            reply=reply,
+            user_id=user_id,
+            nickname=nickname,
+            vision_used=vision_used,
+            warnings=warnings,
+            capabilities=capabilities,
         )
+
+    async def _action_result(self, request: web.Request) -> web.Response:
+        """接收桌面端的动作执行回执；只更新状态，不重新推理"""
+        payload = await _read_json(request)
+        if payload.get("protocolVersion") != PROTOCOL_VERSION:
+            return _error(
+                "动作回执仅支持 protocolVersion=2", 400, "INVALID_INPUT"
+            )
+
+        request_id = str(payload.get("requestId") or "").strip()
+        if not _REQUEST_ID_RE.match(request_id):
+            return _error("requestId 格式不合法", 400, "INVALID_INPUT")
+        session_id = str(payload.get("sessionId") or "").strip()
+        if not _SESSION_ID_RE.match(session_id):
+            return _error("sessionId 格式不合法", 400, "INVALID_INPUT")
+        executed_at = payload.get("executedAt")
+        if (
+            not isinstance(executed_at, (int, float))
+            or isinstance(executed_at, bool)
+        ):
+            return _error("executedAt 必须为数字（Unix 毫秒）", 400, "INVALID_INPUT")
+        results = payload.get("results")
+        if not isinstance(results, list) or len(results) > 8:
+            return _error("results 必须为最多 8 项的数组", 400, "INVALID_INPUT")
+
+        record = self._action_record(self._scope_key(session_id), request_id)
+        if record is None:
+            return _error(
+                "找不到对应的聊天回复（可能已过期或不属于该会话）",
+                404,
+                "NOT_FOUND",
+            )
+        if record.get("reported"):
+            return _error("该请求的动作回执已记录，忽略重复上报", 409, "DUPLICATE_RECEIPT")
+
+        actions = list(record.get("actions") or [])
+        allowed_types = {"motion", "intent", "expression", "pose", "interrupt", "reset"}
+        normalized: List[Dict[str, Any]] = []
+        for item in results:
+            if not isinstance(item, dict):
+                return _error("回执项必须为对象", 400, "INVALID_RECEIPT")
+            index = item.get("index")
+            if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+                return _error("回执 index 必须为非负整数", 400, "INVALID_RECEIPT")
+            action_type = str(item.get("type") or "")
+            if action_type not in allowed_types:
+                return _error(f"未知的动作类型 {action_type}", 400, "INVALID_RECEIPT")
+            status = str(item.get("status") or "")
+            if status not in ("accepted", "rejected"):
+                return _error(
+                    "回执 status 必须为 accepted/rejected", 400, "INVALID_RECEIPT"
+                )
+            if index >= len(actions) or str(actions[index].get("type")) != action_type:
+                return _error(
+                    "回执 index/type 与已下发的动作不匹配", 400, "INVALID_RECEIPT"
+                )
+            normalized.append(
+                {
+                    "index": index,
+                    "type": action_type,
+                    "status": status,
+                    "reason": _clip(item.get("reason"), 200),
+                }
+            )
+
+        record["reported"] = True
+        record["executedAt"] = executed_at
+        record["results"] = normalized
+        logger.info(
+            f"[Fiscok's][suzu] 收到动作回执 "
+            f"(requestId={request_id}, 条数={len(normalized)})"
+        )
+        return _json({"ok": True})
 
     async def _memory_note(self, request: web.Request) -> web.Response:
         payload = await _read_json(request)

@@ -160,7 +160,7 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 
 开启 `suzu_bridge_config.available` 后，插件会额外启动一个独立的 aiohttp 服务（与 AstrBot 面板端口无关），供桌面端模型读取人设、记忆并把聊天交给 AstrBot（默认走主 Agent 管线，也可切换为插件直连 Provider）：
 
-- 接口：`GET /suzu/health`、`GET /suzu/bootstrap`、`POST /suzu/chat`、`GET /suzu/memory`、`POST /suzu/memory/note`、`POST /suzu/persona/evolve`
+- 接口：`GET /suzu/health`、`GET /suzu/bootstrap`、`POST /suzu/chat`、`POST /suzu/action-result`、`GET /suzu/memory`、`POST /suzu/memory/note`、`POST /suzu/persona/evolve`
 - 鉴权：除 `/suzu/health` 外都需要 `Authorization: Bearer <token>`；未配置 token 且未配置白名单时，`/suzu` 接口只接受本机请求（WebUI 有独立的密码会话，仍可远程访问）
 - 来源限制：`allowed_ips` 支持 CIDR 白名单（留空不限制）；`trusted_proxies` 决定哪些地址发来的 `X-Forwarded-For` / `X-Real-IP` 会被采信，防止客户端伪造来源绕过白名单
 - 桌面端默认用 `default_user_id`（默认 `desktop_suzu`）保存个人记忆与好感度；在 WebUI 的 Live2D 标签页填「绑定 QQ 号」后，桌面端改为直接读写该 QQ 账号的个人长期记忆与好感度，和私聊完全一致（只输数字，留空即不绑定）
@@ -169,6 +169,18 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
   - `direct`：插件直连 Provider，只使用本页配置的「桌面聊天 Provider」「人设基线人格」与插件侧的注入（情绪/好感度/个人记忆/演化）
 - `direct` 链路的人设基线为标签页选定的 AstrBot 人格（如 `FisTohu`）；「演化自我设定」是全局共享内容，绑定 QQ 后桌面对话并入该 QQ 私聊的演化对话池
 - 管线模式会继承 QQ 会话的回复装饰（`reply_prefix`、AstrBot 自带分段回复、TTS / 文转图）：若开启文转图，回包可能是图片而不是文本；若开启了 AstrBot 会话白名单（非 WebChat 平台不豁免），需保证绑定 QQ 的私聊 umo 在白名单内
+
+#### 桌面协议 v2
+
+桥接按 `erdi_pet/docs/astrbot-bridge.openapi.json` 的 v2 协议对接（旧字段全部保留，旧客户端不受影响）：
+
+- `GET /suzu/health` 返回 `protocolVersion: 2`，并在 `features` 里声明 `visionInput` / `structuredActions` / `actionReceipts`；`visionInput` 只有在确实配置了支持图片的 Provider 时才为 `true`
+- `POST /suzu/chat` 接收 `requestId`、`sessionId`、`history`、`capabilities`、`environment`（含窗口信息与截图），返回 `reply`、`actions`、`emotion`、`affinity`、`visionUsed`、`warnings`
+- `requestId` 为 8–80 位字母/数字/下划线/连字符，服务端五分钟内只处理一次，重复请求返回 `409 DUPLICATE_REQUEST`；同一身份 + `sessionId` 串行处理
+- 请求体上限放宽到 9MiB，以容纳 base64 截图；单张图片上限 7,000,000 字符，仅接受 `image/jpeg` / `image/png`
+- 图片输入默认开启，可在 WebUI 的 Live2D 标签页「允许图片输入」关闭；关闭或 Provider 不支持图片时会在 `warnings` 说明，并令 `visionUsed=false`
+- `POST /suzu/action-result` 接收动作执行回执，按身份 + `sessionId` + `requestId` 校验下标与类型，五分钟内只接受一次，未知请求返回 404
+- `actions` 只会包含客户端 `capabilities` 里声明过的 `motion` / `expression`，未声明的不下发
 
 #### LLM 对 Live2D 的控制范围
 
@@ -274,6 +286,11 @@ server {
 5. 防火墙为黑名单/全放行时不需要额外开端口；若开了系统防火墙或云厂商安全组，仍需放行该端口。
 
 ## 版本说明
+
+### v2.5
+- 桌面桥接升级到 v2 协议：`/suzu/health` 声明协议版本与能力；`/suzu/chat` 支持 `requestId` 去重（409 `DUPLICATE_REQUEST`）、同会话串行、`capabilities` 白名单动作、`visionUsed` 与 `warnings`；新增 `POST /suzu/action-result` 动作回执（五分钟有效、只接受一次）。
+- 新增桌面图片输入：截图随消息进入 Provider（管线模式注入 `Image` 组件、直连模式走 `image_urls`）；默认开启，可在 WebUI Live2D 标签页关闭；请求体上限放宽到 9MiB。
+- 注入事件不再参与表情包偷取，避免桌面截图被当作表情包保存。
 
 ### v2.4
 - Live2D 桌面端新增「对话链路」，默认改为 `astrbot`：把桌面消息注入 AstrBot 事件队列，由 AstrBot 主 Agent 管线处理（人格、工具、技能、上下文、插件钩子、安全策略全部复用），插件只负责收发内容；绑定 QQ 时 umo 与 QQ 私聊完全一致，共享同一份对话历史与配置。

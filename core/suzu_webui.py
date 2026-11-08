@@ -1025,7 +1025,16 @@ class SuzuWebUI:
             return guard
         payload = await _read_json(request)
         changes: Dict[str, Any] = {}
-        for key in ("token", "chat_mode", "llm_provider_id", "default_user_id", "memory_qq", "persona_id", "default_nickname"):
+        for key in (
+            "token",
+            "chat_mode",
+            "vision_input",
+            "llm_provider_id",
+            "default_user_id",
+            "memory_qq",
+            "persona_id",
+            "default_nickname",
+        ):
             if key in payload:
                 changes[key] = payload.get(key)
         if "allowed_ips" in payload:

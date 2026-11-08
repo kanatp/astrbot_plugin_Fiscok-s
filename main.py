@@ -81,7 +81,7 @@ def _strip_internal_leaks(text: str) -> str:
     return text
 
 
-@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "2.4")
+@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "2.5")
 class Core(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -179,6 +179,9 @@ class Core(Star):
         """
         在每次收到消息时触发表情包偷取判定（后台异步执行，不阻塞主对话）
         """
+        # 桌面端注入的截图是当前画面，不是用户发来的表情包，跳过偷取
+        if event.get_extra('_suzu_pipeline'):
+            return
         meme_config = self.config.get('meme_config', {})
         if not meme_config.get('meme_available', False):
             return

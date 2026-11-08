@@ -24,6 +24,7 @@ DEFAULTS: Dict[str, Any] = {
     "allowed_ips": [],
     "trusted_proxies": ["127.0.0.1", "::1"],
     "chat_mode": "astrbot",
+    "vision_input": True,
     "llm_provider_id": "",
     "default_user_id": "desktop_suzu",
     "memory_qq": "",
@@ -90,6 +91,12 @@ class Live2DSettings:
             value = str(raw.get(key, default) or "").strip()
             return value[:limit]
 
+        def flag(key: str, default: bool) -> bool:
+            value = raw.get(key, default)
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on")
+            return bool(value)
+
         expression_map = []
         for item in raw.get("expression_map", DEFAULT_EXPRESSION_MAP) or []:
             if not isinstance(item, dict):
@@ -112,6 +119,7 @@ class Live2DSettings:
             "chat_mode": "direct"
             if str(raw.get("chat_mode", "astrbot") or "").strip() == "direct"
             else "astrbot",
+            "vision_input": flag("vision_input", True),
             "llm_provider_id": text("llm_provider_id", "", 80),
             "default_user_id": text("default_user_id", "desktop_suzu", 80) or "desktop_suzu",
             "memory_qq": "".join(ch for ch in text("memory_qq", "", 30) if ch.isdigit()),
@@ -142,3 +150,19 @@ class Live2DSettings:
             "motion": motion,
             "segments": segments[:6],
         }
+
+    @staticmethod
+    def build_actions(
+        capabilities: Any, expression: str, motion: str
+    ) -> List[Dict[str, Any]]:
+        """按客户端声明的能力白名单生成结构化动作，未声明的动作不返回"""
+        caps = capabilities if isinstance(capabilities, dict) else {}
+        expressions = {str(item) for item in (caps.get("expressions") or []) if item}
+        motions = {str(item) for item in (caps.get("motions") or []) if item}
+        actions: List[Dict[str, Any]] = []
+        if expression and expression in expressions:
+            actions.append({"type": "expression", "name": expression, "holdMs": 4200})
+        if motion and motion in motions:
+            actions.append({"type": "motion", "name": motion, "mode": "interrupt"})
+        return actions[:8]
+
