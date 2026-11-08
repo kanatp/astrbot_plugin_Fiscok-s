@@ -158,13 +158,17 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 
 ## 桌面端桥接（Live2D 模型）
 
-开启 `suzu_bridge_config.available` 后，插件会额外启动一个独立的 aiohttp 服务（与 AstrBot 面板端口无关），供桌面端模型读取人设、记忆并把聊天交给同一个模型：
+开启 `suzu_bridge_config.available` 后，插件会额外启动一个独立的 aiohttp 服务（与 AstrBot 面板端口无关），供桌面端模型读取人设、记忆并把聊天交给 AstrBot（默认走主 Agent 管线，也可切换为插件直连 Provider）：
 
 - 接口：`GET /suzu/health`、`GET /suzu/bootstrap`、`POST /suzu/chat`、`GET /suzu/memory`、`POST /suzu/memory/note`、`POST /suzu/persona/evolve`
 - 鉴权：除 `/suzu/health` 外都需要 `Authorization: Bearer <token>`；未配置 token 且未配置白名单时，`/suzu` 接口只接受本机请求（WebUI 有独立的密码会话，仍可远程访问）
 - 来源限制：`allowed_ips` 支持 CIDR 白名单（留空不限制）；`trusted_proxies` 决定哪些地址发来的 `X-Forwarded-For` / `X-Real-IP` 会被采信，防止客户端伪造来源绕过白名单
-- 桌面端默认用 `default_user_id`（默认 `desktop_suzu`）保存个人记忆与好感度；在 WebUI 的 Live2D 标签页填「绑定 QQ 号」后，桌面端改为直接读写该 QQ 账号的个人长期记忆与好感度，和私聊完全一致（只输数字，留空即不绑定）；人设基线固定为 Live2D 标签页选定的 AstrBot 人格（如 `FisTohu`），不额外解析 QQ 会话人格；「演化自我设定」是全局共享内容，绑定 QQ 后桌面对话直接并入该 QQ 私聊的演化对话池，两边共同影响同一份结果
-- 桌面聊天会复用插件的人设叠加、情绪/好感度与个人记忆注入；绑定 QQ 后，人设演化对话与计数直接复用该 QQ 私聊会话（共享同一份演化内容），桌面发言同样影响 QQ 那边的演化结果
+- 桌面端默认用 `default_user_id`（默认 `desktop_suzu`）保存个人记忆与好感度；在 WebUI 的 Live2D 标签页填「绑定 QQ 号」后，桌面端改为直接读写该 QQ 账号的个人长期记忆与好感度，和私聊完全一致（只输数字，留空即不绑定）
+- 对话链路在 Live2D 标签页选择：
+  - `astrbot`（默认）：把桌面消息注入 AstrBot 事件队列，umo 对齐绑定 QQ 的私聊会话，人格、工具、技能、上下文、插件钩子与白名单全部复用 AstrBot 自己那一套；插件不再手工拼提示词，绑定 QQ 后桌面与 QQ 私聊共享同一份对话历史与演化内容
+  - `direct`：插件直连 Provider，只使用本页配置的「桌面聊天 Provider」「人设基线人格」与插件侧的注入（情绪/好感度/个人记忆/演化）
+- `direct` 链路的人设基线为标签页选定的 AstrBot 人格（如 `FisTohu`）；「演化自我设定」是全局共享内容，绑定 QQ 后桌面对话并入该 QQ 私聊的演化对话池
+- 管线模式会继承 QQ 会话的回复装饰（`reply_prefix`、AstrBot 自带分段回复、TTS / 文转图）：若开启文转图，回包可能是图片而不是文本；若开启了 AstrBot 会话白名单（非 WebChat 平台不豁免），需保证绑定 QQ 的私聊 umo 在白名单内
 
 #### LLM 对 Live2D 的控制范围
 
@@ -270,6 +274,12 @@ server {
 5. 防火墙为黑名单/全放行时不需要额外开端口；若开了系统防火墙或云厂商安全组，仍需放行该端口。
 
 ## 版本说明
+
+### v2.4
+- Live2D 桌面端新增「对话链路」，默认改为 `astrbot`：把桌面消息注入 AstrBot 事件队列，由 AstrBot 主 Agent 管线处理（人格、工具、技能、上下文、插件钩子、安全策略全部复用），插件只负责收发内容；绑定 QQ 时 umo 与 QQ 私聊完全一致，共享同一份对话历史与配置。
+- 管线链路下不再重复记录桌面对话/情绪（避免与插件钩子双写）；插件侧的表情包单独发送与回复分段钩子会跳过注入事件，避免把桌面回复发到真实 QQ；连续消息合并同样跳过。
+- 新增桌面环境摘要注入钩子；「桌面聊天 Provider」「人设基线人格」标注为仅 `direct` 链路生效。
+- 修复：WebUI 保存 Live2D 设置时遗漏 `persona_id`（选了人格实际没有落盘）。
 
 ### v2.3
 - Live2D 桌面端与 WebUI 服务默认只监听 `127.0.0.1`，不再默认对外开放；监听地址与端口作为引导配置保留在插件配置 `suzu_bridge_config`，其余 Live2D 设置全部迁移到 WebUI。

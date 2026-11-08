@@ -81,7 +81,7 @@ def _strip_internal_leaks(text: str) -> str:
     return text
 
 
-@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "2.3")
+@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "2.4")
 class Core(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -450,6 +450,9 @@ class Core(Star):
         若期间还有新消息则本条不单独回复，由最后一条带上全部片段一起进入 LLM
         """
         merge_config = self.config.get('message_merge_config', {})
+        if event.get_extra('_suzu_pipeline'):
+            # 桌面端与绑定 QQ 共用 umo，跳过合并，避免和 QQ 私聊片段串在一起
+            return
         if not merge_config.get('available', False):
             return
         if merge_config.get('private_only', True) and event.get_group_id():
@@ -735,6 +738,16 @@ class Core(Star):
                 logger.info(f"[Fiscok's][memory] 已注入 {len(items)} 条个人记忆")
         except Exception as e:
             logger.warning(f"[Fiscok's][memory] 检索/注入个人记忆失败，不影响主请求: {e}")
+
+    @filter.on_llm_request()
+    async def on_llm_request_suzu_environment_hook(self, event: AstrMessageEvent, req: ProviderRequest):
+        """
+        Live2D 桌面端注入事件时，把桌面环境摘要补进系统提示词（仅该注入事件携带）
+        """
+        summary = event.get_extra('_suzu_environment')
+        if not summary:
+            return
+        req.system_prompt = f"{req.system_prompt or ''}\n<桌面环境>\n{summary}\n</桌面环境>"
 
     @filter.on_llm_response()
     async def on_llm_response_persona_hook(self, event: AstrMessageEvent, resp):
@@ -1689,6 +1702,9 @@ class Core(Star):
         """
         发送消息前装饰：清理消息链中的占位符残留，并延迟单独发送表情包图片
         """
+        # Live2D 桌面端注入的事件由桥接回包，不能把表情包发到真实 QQ
+        if event.get_extra("_suzu_pipeline"):
+            return
         memes_paths = event.get_extra("_memes_to_attach", [])
         if not memes_paths:
             return
@@ -1722,6 +1738,9 @@ class Core(Star):
         定义在表情包装饰钩子之后，确保先清理占位符再拆分
         """
         segmented_config = self.config.get('segmented_parser_config', {})
+        if event.get_extra('_suzu_pipeline'):
+            # 桌面端回复由桥接统一收取，不能拆成多条发到真实 QQ
+            return
         if not segmented_config.get('available', False):
             return
 

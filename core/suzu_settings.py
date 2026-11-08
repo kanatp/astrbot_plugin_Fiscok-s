@@ -23,6 +23,7 @@ DEFAULTS: Dict[str, Any] = {
     "token": "",
     "allowed_ips": [],
     "trusted_proxies": ["127.0.0.1", "::1"],
+    "chat_mode": "astrbot",
     "llm_provider_id": "",
     "default_user_id": "desktop_suzu",
     "memory_qq": "",
@@ -108,6 +109,9 @@ class Live2DSettings:
             "token": text("token", "", 200),
             "allowed_ips": _clean_list(raw.get("allowed_ips")),
             "trusted_proxies": _clean_list(raw.get("trusted_proxies")) or ["127.0.0.1", "::1"],
+            "chat_mode": "direct"
+            if str(raw.get("chat_mode", "astrbot") or "").strip() == "direct"
+            else "astrbot",
             "llm_provider_id": text("llm_provider_id", "", 80),
             "default_user_id": text("default_user_id", "desktop_suzu", 80) or "desktop_suzu",
             "memory_qq": "".join(ch for ch in text("memory_qq", "", 30) if ch.isdigit()),

@@ -3,7 +3,7 @@
 
 在 AstrBot 插件内起一个独立的、Bearer Token 保护的 HTTP 服务，给桌面端提供：
 - 人设基线 / 演化自我设定 / 情绪 / 好感度 / 个人记忆的读取
-- 以 AstrBot 的 Provider 完成桌面端聊天（复用同一套人设与记忆注入）
+- 以 AstrBot 事件管线完成桌面端聊天（默认），也可选插件直连 Provider
 - 桌面端笔记写入个人长期记忆
 - 手动触发一次人设演化
 
@@ -22,6 +22,7 @@ from aiohttp import web
 
 from astrbot.api import logger
 
+from .api.pipeline_chat_apis import chat_via_astrbot
 from .api.persona_evolution_apis import evolve_persona
 from .api.personal_memory_apis import retrieve_memories
 from .api.provider_utils import resolve_provider
@@ -131,6 +132,8 @@ class SuzuBridge:
         self.persona_id = str(data.get("persona_id") or "").strip()
         self.default_nickname = str(data.get("default_nickname") or "小主人").strip()
         self.llm_provider_id = str(data.get("llm_provider_id") or "").strip()
+        # astrbot：把消息注入 AstrBot 事件队列，复用主 Agent 管线；direct：插件直连 Provider。
+        self.chat_mode = "direct" if data.get("chat_mode") == "direct" else "astrbot"
         self.allowed_networks = _parse_networks(data.get("allowed_ips") or [])
         self.trusted_networks = _parse_networks(
             data.get("trusted_proxies") or ["127.0.0.1", "::1"]
@@ -397,18 +400,61 @@ class SuzuBridge:
     def _umo(self, user_id: str) -> str:
         return f"desktop:{user_id}"
 
+    def _qq_platform(self):
+        """找到 QQ（OneBot/aiocqhttp）平台实例，找不到返回 None"""
+        try:
+            for inst in self.plugin.context.platform_manager.get_insts():
+                meta = inst.meta()
+                pid = str(getattr(meta, "id", "") or "")
+                name = str(getattr(meta, "name", "") or "")
+                if not pid:
+                    continue
+                if (
+                    name == "aiocqhttp"
+                    or "qq" in name.lower()
+                    or "qq" in pid.lower()
+                    or "napcat" in pid.lower()
+                ):
+                    return inst
+        except Exception as exc:
+            logger.warning(f"[Fiscok's][suzu] 解析 QQ 平台失败: {exc}")
+        return None
+
     def _qq_private_umo(self) -> str:
         """绑定 QQ 后复用该账号真实私聊会话的 umo，使演化对话与 QQ 共用一份。"""
         if not self.memory_qq:
             return ""
-        try:
-            for inst in self.plugin.context.platform_manager.get_insts():
-                pid = str(getattr(inst.meta(), "id", "") or "")
-                if pid and ("qq" in pid.lower() or "napcat" in pid.lower()):
-                    return f"{pid}:FriendMessage:{self.memory_qq}"
-        except Exception as exc:
-            logger.warning(f"[Fiscok's][suzu] 解析 QQ 平台失败: {exc}")
-        return ""
+        inst = self._qq_platform()
+        if inst is None:
+            return ""
+        return f"{inst.meta().id}:FriendMessage:{self.memory_qq}"
+
+    @staticmethod
+    def _bot_self_id(inst: Any) -> str:
+        """尽量取到平台实例的机器人账号，取不到时用 "0"（仅用于过滤自己发的消息）"""
+        for holder in (inst, getattr(inst, "bot", None), getattr(inst, "client", None)):
+            if holder is None:
+                continue
+            value = getattr(holder, "self_id", None)
+            if value:
+                return str(value)
+        return "0"
+
+    def _pipeline_target(self) -> tuple:
+        """返回注入事件用的 (平台实例 id, 平台显示名, 机器人账号)。
+
+        绑定 QQ 时用真实 QQ 平台实例 id，使 umo 与 QQ 私聊完全一致；
+        平台显示名固定为 suzu_desktop，避免被当作 QQ 消息做合并转发等额外装饰。
+        """
+        if not self.memory_qq:
+            return "suzu_desktop", "suzu_desktop", "0"
+        inst = self._qq_platform()
+        if inst is None:
+            logger.warning(
+                "[Fiscok's][suzu] 未找到 QQ 平台实例，桌面聊天回退到 AstrBot 默认配置"
+            )
+            return "suzu_desktop", "suzu_desktop", "0"
+        return str(inst.meta().id), "suzu_desktop", self._bot_self_id(inst)
 
     def _evolution_umo(self, user_id: str, umo: str) -> str:
         return self._qq_private_umo() or umo
@@ -603,6 +649,58 @@ class SuzuBridge:
 
         user_id = self._user_id(payload.get("user_id"))
         nickname = self._nickname(payload.get("nickname"))
+        if self.chat_mode == "astrbot":
+            return await self._chat_via_pipeline(payload, text, user_id, nickname)
+        return await self._chat_direct(payload, text, user_id, nickname)
+
+    async def _chat_via_pipeline(
+        self, payload: Dict[str, Any], text: str, user_id: str, nickname: str
+    ) -> web.Response:
+        """把桌面消息注入 AstrBot 事件队列，由主 Agent 管线完成后收回文本。"""
+        platform_id, platform_name, self_id = self._pipeline_target()
+        environment = payload.get("environment") or {}
+        summary = ""
+        if isinstance(environment, dict):
+            summary = _clip(environment.get("summary"), 300)
+
+        try:
+            reply = await chat_via_astrbot(
+                self.plugin.context,
+                text=text,
+                user_id=user_id,
+                nickname=nickname,
+                platform_id=platform_id,
+                platform_name=platform_name,
+                self_id=self_id,
+                environment=summary,
+            )
+        except asyncio.TimeoutError:
+            return _error("模型响应超时", 504)
+        except RuntimeError as exc:
+            return _error(str(exc), 504)
+        except Exception as exc:
+            logger.error(f"[Fiscok's][suzu] 桌面端管线聊天失败: {exc}", exc_info=True)
+            return _error(f"聊天失败: {exc}", 502)
+
+        self.last_chat_at = _iso_now()
+        # 管线里的插件钩子已经记录演化对话、调度情绪分析并累计计数，这里不再重复记录。
+        affinity = self.plugin.data_manager.get_user_affinity(user_id, nickname)
+        return _json(
+            {
+                "ok": True,
+                "reply": reply,
+                "emotion": str(self.plugin.current_emotion or ""),
+                "affinity": affinity,
+                "live2d": self.settings.build_live2d_control(
+                    str(self.plugin.current_emotion or ""), affinity, reply
+                ),
+            }
+        )
+
+    async def _chat_direct(
+        self, payload: Dict[str, Any], text: str, user_id: str, nickname: str
+    ) -> web.Response:
+        """插件直连 Provider 的旧链路，仅在使用本页配置的链路时启用。"""
         umo = self._umo(user_id)
 
         try:

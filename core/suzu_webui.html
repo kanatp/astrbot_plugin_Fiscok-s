@@ -643,8 +643,17 @@
               <input id="l2d-token" type="text" placeholder="留空时 /suzu 仅接受本机请求" />
             </div>
             <div class="field">
+              <label for="l2d-chat-mode">对话链路</label>
+              <select id="l2d-chat-mode">
+                <option value="astrbot">AstrBot 管线（推荐）</option>
+                <option value="direct">插件直连 Provider</option>
+              </select>
+              <div class="hint">管线模式把桌面消息注入 AstrBot，复用人格、工具、技能、插件钩子与绑定 QQ 的私聊上下文；直连只使用本页配置。</div>
+            </div>
+            <div class="field">
               <label for="l2d-provider">桌面聊天 Provider</label>
               <select id="l2d-provider"></select>
+              <div class="hint">仅「插件直连」链路生效。</div>
             </div>
             <div class="field">
               <label for="l2d-nickname">桌面端默认称呼</label>
@@ -658,7 +667,7 @@
             <div class="field">
               <label for="l2d-persona">人设基线人格</label>
               <select id="l2d-persona"></select>
-              <div class="hint">基线固定用这里选择的 AstrBot 人格（如 FisTohu）；演化内容由插件全局维护、与绑定 QQ 共享，桌面端不单独演化。</div>
+              <div class="hint">基线固定用这里选择的 AstrBot 人格（如 FisTohu）；演化内容由插件全局维护、与绑定 QQ 共享，桌面端不单独演化。仅「插件直连」链路生效。</div>
             </div>
             <div class="field">
               <label for="l2d-user">桌面端记忆身份 ID（未绑定 QQ 时使用）</label>
@@ -1056,6 +1065,7 @@
           ? '未配置令牌与白名单：/suzu 仅接受本机请求，WebUI 仍可远程访问。监听地址与端口在 AstrBot 插件配置 suzu_bridge_config 修改。'
           : '监听地址与端口在 AstrBot 插件配置 suzu_bridge_config 修改，改完点「重启服务」。'
         $('l2d-token').value = settings.token || ''
+        $('l2d-chat-mode').value = settings.chat_mode === 'direct' ? 'direct' : 'astrbot'
         const providers = data.providers || []
         const providerSelect = $('l2d-provider')
         providerSelect.innerHTML =
@@ -1089,6 +1099,7 @@
         try {
           const payload = {
             token: $('l2d-token').value.trim(),
+            chat_mode: $('l2d-chat-mode').value,
             llm_provider_id: $('l2d-provider').value,
             default_nickname: $('l2d-nickname').value.trim(),
             memory_qq: $('l2d-memory-qq').value.trim(),
