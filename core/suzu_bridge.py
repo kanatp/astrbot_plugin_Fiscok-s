@@ -22,7 +22,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime
 from ipaddress import ip_address, ip_network
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from aiohttp import web
 
@@ -1227,6 +1227,7 @@ class SuzuBridge:
             return _error("请求体必须为 JSON 对象", 400, "INVALID_INPUT")
         identity = self.memory_user_id
         provider = self._proactive_provider()
+        planner_provider, planner_prompt = self._companion_planner()
         try:
             response = await self.companion_router.sync(
                 payload,
@@ -1238,6 +1239,8 @@ class SuzuBridge:
                     payload.get("environment"), provider
                 ),
                 save_proactive=self._save_proactive,
+                planner_provider=planner_provider,
+                planner_prompt=planner_prompt,
             )
         except ValueError as exc:
             return _error(str(exc), 400, "INVALID_INPUT")
@@ -1256,6 +1259,23 @@ class SuzuBridge:
                 "instanceId": instance_id,
             }
         return _json(response)
+
+    def _companion_planner(self) -> Tuple[Any, str]:
+        """主动行为规划用的 Provider 与独立提示词，来自插件配置 companion_config。"""
+        section = self.plugin.config.get("companion_config", {}) or {}
+        prompt = str(section.get("planner_prompt") or "").strip()
+        provider = None
+        provider_id = str(section.get("planner_provider_id") or "").strip()
+        if provider_id:
+            try:
+                provider = resolve_provider(self.plugin.context, provider_id)
+            except Exception as exc:
+                logger.warning(f"[Fiscok's][suzu] 规划 Provider 解析失败: {exc}")
+            if provider is None:
+                logger.warning(
+                    f"[Fiscok's][suzu] 规划 Provider {provider_id} 不可用，回退到主动陪伴 Provider"
+                )
+        return provider, prompt
 
     def _proactive_provider(self) -> Any:
         """主动决策复用桌面聊天 Provider；没有就不调用模型，只做轻动作。"""

@@ -192,7 +192,8 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 - `POST /suzu/companion/sync` 接收 `events` / `receipts` / `state` / `capabilities`，返回 `ackEventIds`、`ackReceiptIds` 与最多 8 条待执行 `commands`；`requestId` 原样回传
 - 事件按 `id` 去重（每实例最多 512 条），只对 30 秒内的新事件决策；同类型两秒限频由桌面端负责
 - 默认策略：停留/悬停优先安静看向鼠标（10 秒注意力冷却），点击、输入恢复、启动、机会事件选择看向前方 + 微笑 + 点头/轻微摆动（45 秒动作冷却）
-- 点击、启动、输入恢复、应用切换、外部信号与机会事件且预算允许时才调用 Provider 生成行为计划；悬停只做注视、不请求模型；6 秒超时或输出不合法就只保留轻动作，不编造问候
+- 决策分两次调用：第一阶段用人设 + 屏幕资料生成一句发言草稿（语气由人设决定），第二阶段用独立提示词把草稿编排成动作序列 JSON；悬停只做注视、不请求模型
+- 规划侧的 Provider 与提示词在插件配置「主动陪伴」维护：`planner_provider_id`（留空复用桌面聊天 Provider）、`planner_prompt`（留空用内置）；第二阶段超时或输出不合法时退回第一阶段草稿，不编造内容
 - 同步可携带 `environment`（窗口、文字、截图）：超过 30 秒的屏幕资料直接丢弃；截图仅接受 `image/jpeg`、`capturedAt` 一分钟内、解码后 ≤5MB，通过校验才交给 Provider
 - 声明 `capabilities.features.behaviorSequence` 时下发 `sequenceVersion: 1` 与 `sequence`；主动序列最多 4 个动作、400 字、总阻塞 45 秒，`can_speak=false` 时自动去掉发言步骤
 - 主动话语在收到 `accepted` 回执后写回 AstrBot 同一会话历史（按 `commandId` 幂等）；序列只在执行回执的 `spokenText` 确认后保存实际说过的内容，同 ID 的后续执行回执不会被丢弃

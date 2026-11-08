@@ -601,6 +601,25 @@
       }
     }
   },
+  "companion_config": {
+    "description": "Live2D 桌面端主动陪伴（主动动作与主动发言）配置",
+    "type": "object",
+    "items": {
+      "planner_provider_id": {
+        "description": "主动行为计划生成所用辅助 LLM Provider（第二阶段，只负责把发言草稿规划成 JSON 序列）",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空时复用桌面聊天 Provider；建议使用便宜且稳定的模型，辅助调用会自动关闭思考模式"
+      },
+      "planner_prompt": {
+        "description": "主动行为计划生成提示词（独立于聊天人设，只负责输出 JSON 动作序列）",
+        "type": "text",
+        "default": "",
+        "hint": "留空使用内置提示词；第一阶段先用人设生成发言草稿，第二阶段只做动作与顺序编排，不影响人设与语气"
+      }
+    }
+  },
   "suzu_bridge_config": {
     "description": "Live2D 桌面端与 WebUI 服务（访问令牌、白名单等其余设置请到 WebUI 的 Live2D 标签页）",
     "type": "object",

@@ -73,6 +73,16 @@ PROACTIVE_PROMPT = (
     "sequence 为空表示保持安静。\n"
 )
 
+# 第二阶段（把发言草稿整理成行为序列）的内置提示词，可在插件配置里覆盖。
+DEFAULT_PLANNER_PROMPT = (
+    "你是行为计划生成器，不与人对话。输入包含一次主动陪伴事件、桌面能力表和一段已写好的发言草稿。"
+    "请把草稿整理成一次行为序列：先做合适的动作，再说话；也可以只做动作。"
+    "必须只输出一个 JSON 对象，禁止任何自然语言、解释、前后缀或 markdown 代码块。"
+    '格式：{"sequenceVersion":1,"sequence":[...]}；不想说话也不想做动作时输出 '
+    '{"sequenceVersion":1,"sequence":[]}。'
+    "动作只能从能力表里选，名字不得自创；草稿内容可以精简，但不要新增事实或改人称。"
+)
+
 MAX_SCOPES = 128
 MAX_EVENTS = 512
 MAX_COMMANDS = 128
@@ -364,6 +374,8 @@ class CompanionRouter:
         image_urls: Optional[List[str]] = None,
         decide: Optional[Callable[..., Awaitable[Optional[dict]]]] = None,
         save_proactive: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
+        planner_provider: Any = None,
+        planner_prompt: str = "",
     ) -> Dict[str, Any]:
         """处理一次同步：确认事件/回执，按事件与预算决定是否下发新指令。"""
         if not isinstance(body, dict):
@@ -476,6 +488,8 @@ class CompanionRouter:
                     contexts=contexts,
                     image_urls=image_urls if environment else None,
                     decide=decide,
+                    planner_provider=planner_provider,
+                    planner_prompt=planner_prompt,
                 )
 
             pending = [
@@ -534,6 +548,8 @@ class CompanionRouter:
         contexts: Optional[List[dict]],
         image_urls: Optional[List[str]],
         decide: Optional[Callable[..., Awaitable[Optional[dict]]]],
+        planner_provider: Any = None,
+        planner_prompt: str = "",
     ) -> None:
         candidates = [event for event in new_events if event["type"] in EVENT_PRIORITY]
         if not candidates:
@@ -606,6 +622,8 @@ class CompanionRouter:
                 contexts,
                 image_urls,
                 key,
+                planner_provider=planner_provider,
+                planner_prompt=planner_prompt,
             )
             if generated is not None:
                 decision.update(generated)
@@ -673,32 +691,64 @@ class CompanionRouter:
         contexts: Optional[List[dict]],
         image_urls: Optional[List[str]],
         key: Tuple[str, str, str],
+        planner_provider: Any = None,
+        planner_prompt: str = "",
     ) -> Optional[Dict[str, Any]]:
-        """六秒内取回一个可选的行为计划；失败或输出不合法返回 None（只保留轻动作）。"""
-        prompt = PROACTIVE_PROMPT + json.dumps(
-            {"event": event, "can_speak": can_speak, "desktop_capabilities": capabilities},
-            ensure_ascii=False,
-        )
-        if environment:
-            prompt += environment_reference(environment)
-        instruction = system_prompt + "\n" + PROACTIVE_SEQUENCE_NOTE
+        """两次调用：先按人设生成发言草稿，再交给独立提示词把草稿规划成 JSON 序列。"""
+        draft = ""
+        if can_speak:
+            prompt = PROACTIVE_PROMPT + json.dumps(
+                {"event": event, "can_speak": True, "desktop_capabilities": capabilities},
+                ensure_ascii=False,
+            )
+            if environment:
+                prompt += environment_reference(environment)
+            try:
+                response = await asyncio.wait_for(
+                    provider.text_chat(
+                        prompt=prompt,
+                        contexts=contexts or [],
+                        system_prompt=system_prompt,
+                        image_urls=image_urls or None,
+                        session_id=f"{key[0]}/{key[1]}",
+                    ),
+                    timeout=6,
+                )
+            except Exception as exc:
+                hint = "（已附带截图，Provider 可能不支持图片）" if image_urls else ""
+                self.log(f"主动陪伴发言生成失败: {type(exc).__name__}: {exc}{hint}")
+            else:
+                completion = getattr(response, "completion_text", "")
+                if not isinstance(completion, str):
+                    completion = response if isinstance(response, str) else ""
+                draft = completion.strip()[:400]
+            if not draft:
+                # 第一阶段已经决定保持安静，不再进入规划。
+                return {"text": ""}
+
+        planner = planner_provider or provider
+        instruction = (
+            (planner_prompt or "").strip() or DEFAULT_PLANNER_PROMPT
+        ) + "\n" + PROACTIVE_SEQUENCE_NOTE
+        payload = {
+            "event": event,
+            "can_speak": can_speak,
+            "desktop_capabilities": capabilities,
+            "draft": draft,
+        }
         try:
             response = await asyncio.wait_for(
-                provider.text_chat(
-                    prompt=prompt,
+                planner.text_chat(
+                    prompt="决策输入：" + json.dumps(payload, ensure_ascii=False),
                     contexts=contexts or [],
                     system_prompt=instruction,
-                    image_urls=image_urls or None,
                     session_id=f"{key[0]}/{key[1]}",
                 ),
                 timeout=6,
             )
         except Exception as exc:
-            hint = "（已附带截图，Provider 可能不支持图片）" if image_urls else ""
-            self.log(
-                f"主动陪伴 Provider 调用失败: {type(exc).__name__}: {exc}{hint}"
-            )
-            return None
+            self.log(f"主动陪伴规划调用失败: {type(exc).__name__}: {exc}")
+            return {"text": draft} if draft else None
 
         completion = getattr(response, "completion_text", "")
         if not isinstance(completion, str):
@@ -711,17 +761,30 @@ class CompanionRouter:
         try:
             generated = json.loads(completion)
         except ValueError:
-            self.log(f"主动陪伴输出不是合法 JSON（前 240 字）: {completion[:240]}")
-            return None
+            # 模型偶尔会在 JSON 前后带上解释性文字，尝试截取最外层对象再解析一次。
+            start, end = completion.find("{"), completion.rfind("}")
+            generated = None
+            if start >= 0 and end > start:
+                try:
+                    generated = json.loads(completion[start : end + 1])
+                except ValueError:
+                    generated = None
+            if generated is None:
+                self.log(
+                    f"主动陪伴计划输出不是合法 JSON（前 240 字）: {completion[:240]}"
+                )
+                return {"text": draft} if draft else None
         if not isinstance(generated, dict):
-            self.log(f"主动陪伴输出不是 JSON 对象（前 240 字）: {completion[:240]}")
-            return None
+            self.log(
+                f"主动陪伴计划输出不是 JSON 对象（前 240 字）: {completion[:240]}"
+            )
+            return {"text": draft} if draft else None
         if "sequence" in generated:
             if generated.get("sequenceVersion") != 1:
                 self.log(
                     f"主动陪伴序列版本不支持: {generated.get('sequenceVersion')!r}"
                 )
-                return None
+                return {"text": draft} if draft else None
             if not generated["sequence"]:
                 return {"text": "", "actions": []}
             try:
@@ -736,7 +799,7 @@ class CompanionRouter:
                     f"expressions={capabilities.get('expressions')}；"
                     f"输出: {completion[:240]}"
                 )
-                return None
+                return {"text": draft} if draft else None
             if not can_speak:
                 sequence = [step for step in sequence if step["type"] != "say"]
             return {
@@ -746,8 +809,8 @@ class CompanionRouter:
             }
         spoken = generated.get("reply", "")
         if not isinstance(spoken, str) or len(spoken) > 400:
-            self.log(f"主动陪伴回复字段不合法（前 240 字）: {completion[:240]}")
-            return None
+            self.log(f"主动陪伴计划回复字段不合法（前 240 字）: {completion[:240]}")
+            return {"text": draft} if draft else None
         result: Dict[str, Any] = {"text": spoken.strip() if can_speak else ""}
         if "actions" in generated:
             result["actions"] = generated["actions"]
