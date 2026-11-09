@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from .behavior_sequence import (
+    PASSIVE_SEQUENCE_NOTE,
     PROACTIVE_SEQUENCE_NOTE,
     environment_reference,
     fresh_environment,
@@ -66,21 +67,23 @@ PROVIDER_EVENTS = {
 
 RECEIPT_STATUS = ("accepted", "suppressed", "rejected", "cancelled")
 
+# 第一阶段：只负责按人设说一句话，不要在这里要求 JSON（格式交给第二阶段）。
 PROACTIVE_PROMPT = (
     "系统主动陪伴机会（不是用户消息）。请结合提供的屏幕参考内容、事件与会话，"
-    "自主选择动作和简短发言；可以保持安静。只有提供了屏幕资料才能据此回应，"
-    "不要重复打扰。输出 JSON：{\"sequenceVersion\":1,\"sequence\":[...]}，"
-    "sequence 为空表示保持安静。\n"
+    "自主决定要不要说一句话；想保持安静时只输出空内容。只有提供了屏幕资料才能据此回应，"
+    "不要重复打扰，一句话即可，不要解释你在做什么。\n"
 )
 
-# 第二阶段（把发言草稿整理成行为序列）的内置提示词，可在插件配置里覆盖。
+# 第二阶段（把发言草稿编排成行为序列）的内置提示词，可在插件配置里覆盖。
 DEFAULT_PLANNER_PROMPT = (
-    "你是行为计划生成器，不与人对话。输入包含一次主动陪伴事件、桌面能力表和一段已写好的发言草稿。"
-    "请把草稿整理成一次行为序列：先做合适的动作，再说话；也可以只做动作。"
+    "你是行为计划生成器，不与人对话，也不改写别人的话。输入包含 mode、桌面能力表"
+    "（白名单 + actionCatalog 动作目录）与一段已经写好的发言草稿 draft。"
+    "请决定要做哪些动作、按什么顺序执行，并在需要时安排发言步骤。"
+    "mode=chat 时 draft 是最终回复，必须原样作为 say 步骤；mode=proactive 时可以精简 draft 或整体保持安静。"
     "必须只输出一个 JSON 对象，禁止任何自然语言、解释、前后缀或 markdown 代码块。"
-    '格式：{"sequenceVersion":1,"sequence":[...]}；不想说话也不想做动作时输出 '
-    '{"sequenceVersion":1,"sequence":[]}。'
-    "动作只能从能力表里选，名字不得自创；草稿内容可以精简，但不要新增事实或改人称。"
+    '格式：{"sequenceVersion":1,"sequence":[...]}；没有合适的动作时只返回 say；'
+    '完全不需要行动时输出 {"sequenceVersion":1,"sequence":[]}。'
+    "动作只能使用 actionCatalog 里的 name，不要用 title 代替，名字不得自创。"
 )
 
 MAX_SCOPES = 128
@@ -99,8 +102,12 @@ def _finite(value: Any) -> bool:
     )
 
 
+def _catalog_items(raw: Any, limit: int) -> List[Any]:
+    return raw[:limit] if isinstance(raw, list) else []
+
+
 def normalize_capabilities(raw: Any) -> Dict[str, Any]:
-    """把客户端能力收敛成带边界的安全结构"""
+    """把客户端能力收敛成带边界的安全结构（含动作目录与选择策略）"""
     raw = raw if isinstance(raw, dict) else {}
     result: Dict[str, Any] = {}
     for key in ("motions", "intents", "expressions"):
@@ -132,7 +139,177 @@ def normalize_capabilities(raw: Any) -> Dict[str, Any]:
             result["semantic"].append(
                 {"name": item["name"][:80], "min": item["min"], "max": item["max"]}
             )
+    result["actionPolicy"] = _normalize_action_policy(raw.get("actionPolicy"))
+    result["actionCatalog"] = _normalize_action_catalog(
+        raw.get("actionCatalog"), result
+    )
     return result
+
+
+def _normalize_action_policy(raw: Any) -> Dict[str, Any]:
+    """动作选择策略：catalog 表示按目录选择，emotionMapping=false 表示禁止情绪映射。"""
+    if not isinstance(raw, dict):
+        return {}
+    version = raw.get("version")
+    selection = raw.get("selection")
+    return {
+        "version": int(version) if _finite(version) and 1 <= version <= 10 else 0,
+        "selection": selection[:20] if isinstance(selection, str) else "",
+        "emotionMapping": raw.get("emotionMapping") is True,
+    }
+
+
+def _normalize_action_catalog(raw: Any, caps: Dict[str, Any]) -> Dict[str, Any]:
+    """动作目录只作为描述资料保留；条目必须属于对应白名单，意图只能引用允许的动作。"""
+    if not isinstance(raw, dict):
+        return {}
+    version = raw.get("version")
+    catalog: Dict[str, Any] = {
+        "version": int(version) if _finite(version) and 1 <= version <= 10 else 0,
+        "motions": [],
+        "expressions": [],
+        "intents": [],
+    }
+    allowed_motions = set(caps.get("motions", []))
+    allowed_expressions = set(caps.get("expressions", []))
+    allowed_intents = set(caps.get("intents", []))
+
+    for item in _catalog_items(raw.get("motions"), 128):
+        if not isinstance(item, dict) or item.get("name") not in allowed_motions:
+            continue
+        entry: Dict[str, Any] = {"name": item["name"]}
+        if isinstance(item.get("title"), str):
+            entry["title"] = item["title"][:120]
+        if _finite(item.get("durationMs")):
+            entry["durationMs"] = max(0, min(600000, item["durationMs"]))
+        if isinstance(item.get("loop"), bool):
+            entry["loop"] = item["loop"]
+        catalog["motions"].append(entry)
+
+    for item in _catalog_items(raw.get("expressions"), 128):
+        if not isinstance(item, dict) or item.get("name") not in allowed_expressions:
+            continue
+        entry = {"name": item["name"]}
+        if isinstance(item.get("title"), str):
+            entry["title"] = item["title"][:120]
+        catalog["expressions"].append(entry)
+
+    for item in _catalog_items(raw.get("intents"), 64):
+        if not isinstance(item, dict) or item.get("name") not in allowed_intents:
+            continue
+        entry = {"name": item["name"]}
+        if isinstance(item.get("title"), str):
+            entry["title"] = item["title"][:120]
+        motions = [
+            name
+            for name in _catalog_items(item.get("motions"), 16)
+            if isinstance(name, str) and name in allowed_motions
+        ]
+        if motions:
+            entry["motions"] = motions
+        catalog["intents"].append(entry)
+
+    if not (catalog["motions"] or catalog["expressions"] or catalog["intents"]):
+        return {}
+    return catalog
+
+
+def _catalog_payload(capabilities: Dict[str, Any]) -> Dict[str, Any]:
+    """交给规划器的能力资料：白名单 + 动作目录（不含任何可执行代码）。"""
+    return {
+        "motions": capabilities.get("motions", []),
+        "intents": capabilities.get("intents", []),
+        "expressions": capabilities.get("expressions", []),
+        "semantic": capabilities.get("semantic", []),
+        "features": capabilities.get("features", {}),
+        "actionCatalog": capabilities.get("actionCatalog") or {},
+    }
+
+
+def parse_sequence_output(
+    raw: Any, capabilities: Dict[str, Any], proactive: bool = False
+) -> List[Dict[str, Any]]:
+    """解析规划器输出：允许 markdown 围栏与前后解释文字，其余严格校验。"""
+    text = raw if isinstance(raw, str) else ""
+    text = text.strip()
+    if text.startswith("```json\n") and text.endswith("```"):
+        text = text[8:-3].strip()
+    elif text.startswith("```\n") and text.endswith("```"):
+        text = text[4:-3].strip()
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError(f"输出不是 JSON（前 240 字）: {text[:240]}")
+        try:
+            parsed = json.loads(text[start : end + 1])
+        except ValueError:
+            raise ValueError(f"输出不是 JSON（前 240 字）: {text[:240]}")
+    if not isinstance(parsed, dict):
+        raise ValueError(f"输出不是 JSON 对象（前 240 字）: {text[:240]}")
+    if parsed.get("sequenceVersion") != 1:
+        raise ValueError(f"序列版本不支持: {parsed.get('sequenceVersion')!r}")
+    steps = parsed.get("sequence")
+    if not isinstance(steps, list):
+        raise ValueError("输出缺少 sequence 数组")
+    if not steps:
+        return []
+    return validate_sequence(steps, capabilities, proactive=proactive)
+
+
+async def plan_sequence(
+    planner: Any,
+    *,
+    capabilities: Dict[str, Any],
+    draft: str,
+    user_text: str = "",
+    event: Optional[dict] = None,
+    environment: Optional[Dict[str, Any]] = None,
+    contexts: Optional[List[dict]] = None,
+    session_id: str = "",
+    planner_prompt: str = "",
+    proactive: bool = False,
+    timeout: float = 8.0,
+) -> List[Dict[str, Any]]:
+    """第二阶段：把发言草稿、用户输入与动作目录交给规划模型，返回校验过的序列。"""
+    if planner is None:
+        raise ValueError("没有可用的行为规划 Provider")
+    if capabilities.get("features", {}).get("behaviorSequence") is not True:
+        raise ValueError("桌面端未声明行为序列能力")
+    payload: Dict[str, Any] = {
+        "mode": "proactive" if proactive else "chat",
+        "draft": str(draft or "")[:12000],
+        "desktop_capabilities": _catalog_payload(capabilities),
+    }
+    if user_text:
+        payload["userText"] = str(user_text)[:2000]
+    if event:
+        payload["event"] = event
+    if environment:
+        payload["environment"] = {
+            "summary": str(environment.get("summary", ""))[:2000],
+            "text": str(environment.get("text", ""))[:4000],
+            "window": environment.get("window")
+            if isinstance(environment.get("window"), dict)
+            else {},
+        }
+    instruction = ((planner_prompt or "").strip() or DEFAULT_PLANNER_PROMPT) + "\n" + (
+        PROACTIVE_SEQUENCE_NOTE if proactive else PASSIVE_SEQUENCE_NOTE
+    )
+    response = await asyncio.wait_for(
+        planner.text_chat(
+            prompt="决策输入：" + json.dumps(payload, ensure_ascii=False),
+            contexts=contexts or [],
+            system_prompt=instruction,
+            session_id=session_id,
+        ),
+        timeout=timeout,
+    )
+    completion = getattr(response, "completion_text", "")
+    if not isinstance(completion, str):
+        completion = response if isinstance(response, str) else ""
+    return parse_sequence_output(completion, capabilities, proactive=proactive)
 
 
 def validate_actions(raw: Any, capabilities: Dict[str, Any]) -> Tuple[List[dict], List[str]]:
@@ -727,91 +904,39 @@ class CompanionRouter:
                 return {"text": ""}
 
         planner = planner_provider or provider
-        instruction = (
-            (planner_prompt or "").strip() or DEFAULT_PLANNER_PROMPT
-        ) + "\n" + PROACTIVE_SEQUENCE_NOTE
-        payload = {
-            "event": event,
-            "can_speak": can_speak,
-            "desktop_capabilities": capabilities,
-            "draft": draft,
-        }
         try:
-            response = await asyncio.wait_for(
-                planner.text_chat(
-                    prompt="决策输入：" + json.dumps(payload, ensure_ascii=False),
-                    contexts=contexts or [],
-                    system_prompt=instruction,
-                    session_id=f"{key[0]}/{key[1]}",
-                ),
-                timeout=6,
+            sequence = await plan_sequence(
+                planner,
+                capabilities=capabilities,
+                draft=draft,
+                event=event,
+                environment=environment,
+                contexts=contexts,
+                session_id=f"{key[0]}/{key[1]}",
+                planner_prompt=planner_prompt,
+                proactive=True,
             )
+        except ValueError as exc:
+            self.log(
+                f"主动陪伴计划不可用: {exc}；"
+                f"motions={capabilities.get('motions')}, "
+                f"intents={capabilities.get('intents')}, "
+                f"expressions={capabilities.get('expressions')}"
+            )
+            return {"text": draft} if draft else None
         except Exception as exc:
             self.log(f"主动陪伴规划调用失败: {type(exc).__name__}: {exc}")
             return {"text": draft} if draft else None
 
-        completion = getattr(response, "completion_text", "")
-        if not isinstance(completion, str):
-            completion = response if isinstance(response, str) else ""
-        completion = completion.strip()
-        if completion.startswith("```json\n") and completion.endswith("```"):
-            completion = completion[8:-3].strip()
-        elif completion.startswith("```\n") and completion.endswith("```"):
-            completion = completion[4:-3].strip()
-        try:
-            generated = json.loads(completion)
-        except ValueError:
-            # 模型偶尔会在 JSON 前后带上解释性文字，尝试截取最外层对象再解析一次。
-            start, end = completion.find("{"), completion.rfind("}")
-            generated = None
-            if start >= 0 and end > start:
-                try:
-                    generated = json.loads(completion[start : end + 1])
-                except ValueError:
-                    generated = None
-            if generated is None:
-                self.log(
-                    f"主动陪伴计划输出不是合法 JSON（前 240 字）: {completion[:240]}"
-                )
-                return {"text": draft} if draft else None
-        if not isinstance(generated, dict):
-            self.log(
-                f"主动陪伴计划输出不是 JSON 对象（前 240 字）: {completion[:240]}"
-            )
-            return {"text": draft} if draft else None
-        if "sequence" in generated:
-            if generated.get("sequenceVersion") != 1:
-                self.log(
-                    f"主动陪伴序列版本不支持: {generated.get('sequenceVersion')!r}"
-                )
-                return {"text": draft} if draft else None
-            if not generated["sequence"]:
-                return {"text": "", "actions": []}
-            try:
-                sequence = validate_sequence(
-                    generated["sequence"], capabilities, proactive=True
-                )
-            except ValueError as exc:
-                self.log(
-                    f"主动陪伴序列校验失败: {exc}；"
-                    f"motions={capabilities.get('motions')}, "
-                    f"intents={capabilities.get('intents')}, "
-                    f"expressions={capabilities.get('expressions')}；"
-                    f"输出: {completion[:240]}"
-                )
-                return {"text": draft} if draft else None
-            if not can_speak:
-                sequence = [step for step in sequence if step["type"] != "say"]
-            return {
-                "text": sequence_text(sequence),
-                "actions": sequence_actions(sequence),
-                "sequence": sequence,
-            }
-        spoken = generated.get("reply", "")
-        if not isinstance(spoken, str) or len(spoken) > 400:
-            self.log(f"主动陪伴计划回复字段不合法（前 240 字）: {completion[:240]}")
-            return {"text": draft} if draft else None
-        result: Dict[str, Any] = {"text": spoken.strip() if can_speak else ""}
-        if "actions" in generated:
-            result["actions"] = generated["actions"]
-        return result
+        if not sequence:
+            # 规划器明确选择保持安静
+            return {"text": ""}
+        if not can_speak:
+            sequence = [step for step in sequence if step["type"] != "say"]
+            if not sequence:
+                return {"text": ""}
+        return {
+            "text": sequence_text(sequence),
+            "actions": sequence_actions(sequence),
+            "sequence": sequence,
+        }

@@ -974,41 +974,6 @@ class SuzuWebUI:
             })
         return result
 
-    @staticmethod
-    def _parse_expression_map(text: str) -> List[Dict[str, Any]]:
-        """把「关键词1,关键词2 = 表情 / 动作」逐行解析成映射表"""
-        result: List[Dict[str, Any]] = []
-        for line in str(text or "").splitlines():
-            raw = line.strip()
-            if not raw or raw.startswith("#"):
-                continue
-            if "=>" in raw:
-                left, right = raw.split("=>", 1)
-            elif "=" in raw:
-                left, right = raw.split("=", 1)
-            else:
-                continue
-            keywords = [
-                item.strip()
-                for item in left.replace("，", ",").split(",")
-                if item.strip()
-            ]
-            parts = [
-                item.strip()
-                for item in right.replace("，", "/").split("/")
-                if item.strip()
-            ]
-            if not keywords or not parts:
-                continue
-            result.append({
-                "keywords": keywords[:10],
-                "expression": parts[0][:40],
-                "motion": (parts[1] if len(parts) > 1 else "")[:40],
-            })
-            if len(result) >= 20:
-                break
-        return result
-
     async def _live2d_get(self, request: web.Request) -> web.Response:
         guard = self._guard(request)
         if guard:
@@ -1017,6 +982,7 @@ class SuzuWebUI:
             "ok": True,
             "settings": self.bridge.settings_view(),
             "providers": self._providers(),
+            "catalogs": self.bridge.catalogs_view(),
         })
 
     async def _live2d_set(self, request: web.Request) -> web.Response:
@@ -1041,10 +1007,6 @@ class SuzuWebUI:
             changes["allowed_ips"] = payload.get("allowed_ips")
         if "trusted_proxies" in payload:
             changes["trusted_proxies"] = payload.get("trusted_proxies")
-        if "expression_map_text" in payload:
-            changes["expression_map"] = self._parse_expression_map(
-                payload.get("expression_map_text")
-            )
         if not changes:
             return _json({"ok": False, "error": "没有可保存的设置"}, 400)
         try:

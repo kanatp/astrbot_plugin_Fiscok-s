@@ -172,16 +172,17 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 
 #### 桌面协议 v2
 
-桥接按 `erdi_pet/docs/astrbot-bridge.openapi.json` 的 v2 协议对接（旧字段全部保留，旧客户端不受影响）：
+桥接按 `erdi_pet/docs/astrbot-bridge.openapi.json` 的 v2 协议对接：
 
-- `GET /suzu/health` 返回 `protocolVersion: 2`，并在 `features` 里声明 `visionInput` / `structuredActions` / `actionReceipts`；`visionInput` 只有在确实配置了支持图片的 Provider 时才为 `true`
+- `GET /suzu/health` 返回 `protocolVersion: 2`，并在 `features` 里声明 `visionInput` / `structuredActions` / `actionReceipts` / `actionCatalog`；`visionInput` 只有在确实配置了支持图片的 Provider 时才为 `true`
 - `POST /suzu/chat` 接收 `requestId`、`sessionId`、`history`、`capabilities`、`environment`（含窗口信息与截图），返回 `reply`、`actions`、`emotion`、`affinity`、`visionUsed`、`warnings`
 - `requestId` 为 8–80 位字母/数字/下划线/连字符，服务端五分钟内只处理一次，重复请求返回 `409 DUPLICATE_REQUEST`；同一身份 + `sessionId` 串行处理
 - 请求体上限放宽到 9MiB，以容纳 base64 截图；单张图片上限 7,000,000 字符，仅接受 `image/jpeg` / `image/png`
 - 图片输入默认开启，可在 WebUI 的 Live2D 标签页「允许图片输入」关闭；关闭或 Provider 不支持图片时会在 `warnings` 说明，并令 `visionUsed=false`
 - `POST /suzu/action-result` 接收动作执行回执，按身份 + `sessionId` + `requestId` 校验下标与类型，五分钟内只接受一次，未知请求返回 404
+- 客户端声明 `capabilities.actionPolicy`（`selection: catalog`、`emotionMapping: false`）与 `actionCatalog` 时，插件不再做任何情绪映射：动作由规划模型按目录里的 `name` 选择，目录只作为描述资料解析（条目必须属于对应白名单，意图只能引用允许的动作）
 - `actions` 只会包含客户端 `capabilities` 里声明过的 `motion` / `expression`，未声明的不下发
-- 客户端声明 `capabilities.features.behaviorSequence` 时，响应额外返回 `sequenceVersion: 1` 与 `sequence`（先动作、后发言，严格按步数/文字量/总时长校验）；存在 `sequence` 时它是唯一执行计划，`reply` / `actions` 仅作兼容
+- 客户端声明 `capabilities.features.behaviorSequence` 时，响应额外返回 `sequenceVersion: 1` 与 `sequence`（先动作、后发言，严格按步数/文字量/总时长校验）；存在 `sequence` 时它是唯一执行计划，`reply` / `actions` 仅作兼容；聊天里发言步骤固定使用主 Agent 的完整回复，规划器只决定动作与顺序
 - `POST /suzu/action-result` 支持 `execution`：`steps` 必须逐一对应原始步骤下标，`spokenText` 必须是原发言的前缀；先 `accepted`、后带 `execution` 的同 `requestId` 上报不会丢失
 
 #### 主动陪伴（主动协议 v1）
@@ -203,26 +204,25 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 
 #### LLM 对 Live2D 的控制范围
 
-插件侧不直接编排动作，而是把回复与状态整理成客户端可直接消费的控制块。`POST /suzu/chat` 返回：
+按 `erdi_pet/docs/DIRECT_ACTION_CATALOG.md` 实现：插件不做情绪 → 表情 / 动作映射，动作完全由规划模型按桌面端上报的动作目录选择。`POST /suzu/chat` 返回：
 
 ```json
 {
   "reply": "好呀，今天想聊什么？",
   "emotion": "开心",
   "affinity": 62,
-  "live2d": {
-    "emotion": "开心",
-    "affinity": 62,
-    "expression": "smile",
-    "motion": "",
-    "segments": ["好呀，", "今天想聊什么？"]
-  }
+  "sequenceVersion": 1,
+  "sequence": [
+    {"type": "action", "action": {"type": "motion", "name": "curiousLook", "mode": "interrupt"}, "waitForCompletion": true},
+    {"type": "say", "text": "好呀，今天想聊什么？", "holdMs": 1600}
+  ]
 }
 ```
 
-- `expression` / `motion` 由 WebUI Live2D 标签页里配置的「关键词 → 表情 / 动作」映射按当前情绪匹配得出；客户端识别不到对应表情时直接忽略即可
-- `segments` 按换行切分，供桌宠逐条气泡显示或逐句 TTS
-- `GET /suzu/bootstrap` 的 `live2d` 字段返回当前可用映射与支持的控制项（`expression` / `motion` / `segments`），客户端可据此校验模型能力
+- 两阶段决策与主动陪伴一致：聊天回复本身就是第一阶段草稿，第二阶段由规划模型按目录决定动作与顺序；发言步骤固定使用主 Agent 的完整回复，不改写、不删减
+- 规划失败、模型不服从 JSON 或动作不在目录内时只返回真实回复的 `say`，不伪造动作，也不会回退到情绪映射
+- 动作目录与选择策略按 `sessionId` 保存在插件进程内，最近 32 个会话，同一会话重新上报即覆盖；WebUI 的 Live2D 标签页「已同步的动作目录」可以直接查看动作 / 表情 / 意图名称、标题、时长与循环标记
+- `GET /suzu/health` 的 `features.actionCatalog=true` 表示插件支持按目录选动作
 - 若桌面端自带更细的姿态系统，可继续用本地 Brain 兜底；桥接只提供插件侧能确定的状态
 
 ### Fiscok_webui（类 NapCat 登录）
@@ -233,7 +233,7 @@ Twitter 拉取与推送的节流间隔均可配置，且只在账号 / 群聊之
 - 访问 `http://<插件地址>:6199/`，用随机生成的本机密码登录
 - 首次启动随机生成 10 位密码，写入插件数据目录 `suzu_webui.json`，并打印在 AstrBot 本机日志（与 NapCat 在控制台打印 token 一致）
 - 页面按标签页划分：概览 / Live2D / 记忆 / 表情包 / 情绪好感 / 插件配置
-- Live2D 标签页集中管理桌面端相关的一切：访问令牌、来源 IP 白名单、可信反向代理、桌面聊天 Provider、默认称呼与记忆身份、情绪 → 表情 / 动作映射，并提供「重启服务」；监听地址与端口属于启动引导配置，仍在插件配置里修改
+- Live2D 标签页集中管理桌面端相关的一切：访问令牌、来源 IP 白名单、可信反向代理、桌面聊天 Provider、默认称呼与记忆身份、是否允许图片输入，并展示桌面端最近上报的动作目录，提供「重启服务」；监听地址与端口属于启动引导配置，仍在插件配置里修改
 - 概览：桥接运行状态、桌面端最近连接 / 聊天时间；支持手动「演化一次」
 - 记忆：话题记忆按会话切换、私聊记忆按用户切换，均可修改内容与重要度、单条删除与清空
 - 表情包库：缩略图预览、关键字搜索、按标签 / 情绪筛选，可编辑描述、标签与情绪，支持单条删除与清空

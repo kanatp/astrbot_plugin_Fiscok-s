@@ -481,6 +481,19 @@
       .live2d-form textarea { min-height: 78px; resize: vertical; }
       .live2d-form input[readonly] { color: var(--muted); background: #f7f4fb; }
       .live2d-form .hint { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; word-break: break-all; }
+      .catalog-list { margin-top: 6px; display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow: auto; }
+      .catalog-item {
+        padding: 8px 10px;
+        border: 1px solid rgba(160, 130, 190, 0.2);
+        border-radius: 10px;
+        background: #faf7fd;
+        font-size: 11.5px;
+        line-height: 1.6;
+      }
+      .catalog-head { font-weight: 600; color: #5c4a72; word-break: break-all; }
+      .catalog-head .hint { margin: 0; display: inline; }
+      .catalog-line { margin-top: 3px; color: #4a4357; word-break: break-all; }
+      .catalog-line b { margin-right: 6px; color: #8a6fae; font-weight: 600; }
       .live2d-form .actions {
         grid-column: 1 / -1;
         display: flex;
@@ -690,9 +703,9 @@
               <textarea id="l2d-trusted" placeholder="同机 nginx 保持 127.0.0.1 / ::1"></textarea>
             </div>
             <div class="field wide">
-              <label for="l2d-map">情绪 → 表情 / 动作映射</label>
-              <textarea id="l2d-map" placeholder="开心,高兴 = smile / tap_head"></textarea>
-              <div class="hint">每行格式：关键词1,关键词2 = 表情 / 动作（动作可省略）。关键词匹配当前情绪文字；留空则全部使用客户端默认。</div>
+              <label>已同步的动作目录</label>
+              <div class="hint">桌面端在聊天或主动同步时上报动作目录（actionCatalog）；动作选择完全由规划模型按目录决定，插件端只做展示。</div>
+              <div id="l2d-catalog" class="catalog-list"><div class="hint">还没有收到桌面端上报的动作目录。</div></div>
             </div>
             <div class="actions">
               <span class="msg" id="live2d-msg"></span>
@@ -1048,14 +1061,50 @@
         }
       }
 
-      function expressionMapText(items) {
-        return (items || [])
+      function renderCatalogs(catalogs) {
+        const box = $('l2d-catalog')
+        const items = catalogs || []
+        if (!items.length) {
+          box.innerHTML = '<div class="hint">还没有收到桌面端上报的动作目录。</div>'
+          return
+        }
+        box.innerHTML = items
           .map((item) => {
-            const keywords = (item.keywords || []).join(',')
-            const right = item.motion ? item.expression + ' / ' + item.motion : item.expression
-            return keywords + ' = ' + right
+            const policy = item.policy || {}
+            const motionList = (item.motions || [])
+              .map((entry) => {
+                const parts = [entry.name]
+                if (entry.title) parts.push('「' + entry.title + '」')
+                if (entry.durationMs) parts.push(entry.durationMs + 'ms')
+                if (entry.loop) parts.push('循环')
+                return parts.join(' ')
+              })
+              .join('、')
+            const expressionList = (item.expressions || [])
+              .map((entry) => entry.title ? entry.name + '「' + entry.title + '」' : entry.name)
+              .join('、')
+            const intentList = (item.intents || [])
+              .map((entry) => {
+                const motions = (entry.motions || []).join('+')
+                const label = entry.title ? entry.name + '「' + entry.title + '」' : entry.name
+                return motions ? label + ' → ' + motions : label
+              })
+              .join('、')
+            return (
+              '<div class="catalog-item">' +
+              '<div class="catalog-head">' +
+              esc(item.sessionId || item.scope || 'default') +
+              '<span class="hint"> ' + esc(item.at || '') +
+              ' · 策略 ' + esc(policy.selection || '未声明') +
+              ' · 情绪映射 ' + (policy.emotionMapping ? '开启' : '关闭') +
+              ' · 目录版本 ' + esc(String(item.version || 0)) + '</span></div>' +
+              '<div class="catalog-line"><b>动作</b>' + (esc(motionList) || '（无）') + '</div>' +
+              '<div class="catalog-line"><b>表情</b>' + (esc(expressionList) || '（无）') + '</div>' +
+              '<div class="catalog-line"><b>意图</b>' + (esc(intentList) || '（无）') + '</div>' +
+              '</div>'
+            )
           })
-          .join('\n')
+          .join('')
       }
 
       function linesToArray(text) {
@@ -1099,7 +1148,7 @@
         personaSel.value = settings.persona_id || ''
         $('l2d-allowed').value = (settings.allowed_ips || []).join('\n')
         $('l2d-trusted').value = (settings.trusted_proxies || []).join('\n')
-        $('l2d-map').value = expressionMapText(settings.expression_map)
+        renderCatalogs(data.catalogs)
         live2dLoaded = true
       }
 
@@ -1116,8 +1165,7 @@
             persona_id: $('l2d-persona').value,
             default_user_id: $('l2d-user').value.trim(),
             allowed_ips: linesToArray($('l2d-allowed').value),
-            trusted_proxies: linesToArray($('l2d-trusted').value),
-            expression_map_text: $('l2d-map').value
+            trusted_proxies: linesToArray($('l2d-trusted').value)
           }
           await api('/ui/api/live2d', { method: 'POST', body: JSON.stringify(payload) })
           setMsg('live2d-msg', '设置已保存并立即生效', 'ok')

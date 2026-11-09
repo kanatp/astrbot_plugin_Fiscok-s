@@ -11,14 +11,6 @@ from typing import Any, Dict, List
 
 from astrbot.api import logger
 
-# 情绪关键词 -> Live2D 表情 / 动作的默认映射（可在 WebUI 里改）
-DEFAULT_EXPRESSION_MAP: List[Dict[str, Any]] = [
-    {"keywords": ["开心", "高兴", "愉快", "笑", "happy"], "expression": "smile", "motion": ""},
-    {"keywords": ["害羞", "脸红", "不好意思", "shy"], "expression": "shy", "motion": ""},
-    {"keywords": ["难过", "低落", "伤心", "委屈", "sad"], "expression": "sad", "motion": ""},
-    {"keywords": ["生气", "愤怒", "恼火", "angry"], "expression": "angry", "motion": ""},
-]
-
 DEFAULTS: Dict[str, Any] = {
     "token": "",
     "allowed_ips": [],
@@ -30,7 +22,6 @@ DEFAULTS: Dict[str, Any] = {
     "memory_qq": "",
     "persona_id": "",
     "default_nickname": "小主人",
-    "expression_map": DEFAULT_EXPRESSION_MAP,
 }
 
 
@@ -97,21 +88,6 @@ class Live2DSettings:
                 return value.strip().lower() in ("1", "true", "yes", "on")
             return bool(value)
 
-        expression_map = []
-        for item in raw.get("expression_map", DEFAULT_EXPRESSION_MAP) or []:
-            if not isinstance(item, dict):
-                continue
-            keywords = _clean_list(item.get("keywords"), limit=10, item_limit=20)
-            expression = str(item.get("expression", "") or "").strip()[:40]
-            motion = str(item.get("motion", "") or "").strip()[:40]
-            if keywords and (expression or motion):
-                expression_map.append(
-                    {"keywords": keywords, "expression": expression, "motion": motion}
-                )
-        # 只有设置文件里从未写过映射时才用默认值；用户清空映射表示交给客户端自己决定。
-        if not expression_map and "expression_map" not in raw:
-            expression_map = DEFAULT_EXPRESSION_MAP
-
         return {
             "token": text("token", "", 200),
             "allowed_ips": _clean_list(raw.get("allowed_ips")),
@@ -125,44 +101,7 @@ class Live2DSettings:
             "memory_qq": "".join(ch for ch in text("memory_qq", "", 30) if ch.isdigit()),
             "persona_id": text("persona_id", "", 80),
             "default_nickname": text("default_nickname", "小主人", 40) or "小主人",
-            "expression_map": expression_map[:20],
         }
 
-    def build_live2d_control(self, emotion: str, affinity: int, reply: str) -> Dict[str, Any]:
-        """按当前情绪匹配表情 / 动作，并把回复切成适合气泡逐条显示的片段"""
-        emotion_text = str(emotion or "").strip()
-        expression = ""
-        motion = ""
-        for item in self.data.get("expression_map", []):
-            if any(keyword and keyword in emotion_text for keyword in item.get("keywords", [])):
-                expression = item.get("expression", "")
-                motion = item.get("motion", "")
-                break
 
-        segments = [line.strip() for line in str(reply or "").splitlines() if line.strip()]
-        if not segments:
-            segments = [str(reply or "").strip()]
-
-        return {
-            "emotion": emotion_text,
-            "affinity": affinity,
-            "expression": expression,
-            "motion": motion,
-            "segments": segments[:6],
-        }
-
-    @staticmethod
-    def build_actions(
-        capabilities: Any, expression: str, motion: str
-    ) -> List[Dict[str, Any]]:
-        """按客户端声明的能力白名单生成结构化动作，未声明的动作不返回"""
-        caps = capabilities if isinstance(capabilities, dict) else {}
-        expressions = {str(item) for item in (caps.get("expressions") or []) if item}
-        motions = {str(item) for item in (caps.get("motions") or []) if item}
-        actions: List[Dict[str, Any]] = []
-        if expression and expression in expressions:
-            actions.append({"type": "expression", "name": expression, "holdMs": 4200})
-        if motion and motion in motions:
-            actions.append({"type": "motion", "name": motion, "mode": "interrupt"})
-        return actions[:8]
 

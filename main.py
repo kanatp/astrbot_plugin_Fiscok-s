@@ -81,7 +81,7 @@ def _strip_internal_leaks(text: str) -> str:
     return text
 
 
-@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "2.7")
+@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "2.8")
 class Core(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)

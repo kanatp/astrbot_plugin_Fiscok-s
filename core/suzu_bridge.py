@@ -34,8 +34,17 @@ from .api.persona_evolution_apis import evolve_persona
 from .api.personal_memory_apis import retrieve_memories
 from .api.provider_utils import resolve_provider
 from .api.topic_memory_apis import get_text_embedding, resolve_embedding_provider
-from .behavior_sequence import derive_sequence, fresh_environment, validate_execution
-from .companion_router import CompanionRouter
+from .behavior_sequence import (
+    fresh_environment,
+    sequence_actions,
+    uses_action_catalog,
+    validate_execution,
+)
+from .companion_router import (
+    CompanionRouter,
+    normalize_capabilities,
+    plan_sequence,
+)
 from .suzu_settings import Live2DSettings
 from .prompts import (
     format_emotion_state_injection,
@@ -143,6 +152,8 @@ class SuzuBridge:
         self.last_companion_instance: Dict[str, str] = {}
         self._saved_proactive: "OrderedDict[str, float]" = OrderedDict()
         self._proactive_prompt_cache: tuple = ("", 0.0)
+        # 最近同步的动作目录（按会话隔离，模型切换时覆盖），供插件 WebUI 展示
+        self._action_catalogs: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         # 插件 WebUI（密码会话）；初始化失败时降级为纯桥接，不影响桌面端使用。
         self.webui = None
         try:
@@ -189,7 +200,6 @@ class SuzuBridge:
     def settings_view(self) -> Dict[str, Any]:
         """供 WebUI 展示的 Live2D 设置与服务状态"""
         data = dict(self.settings.data)
-        data["expression_map"] = list(data.get("expression_map") or [])
         try:
             data["personas"] = [
                 str(item.get("name") or "")
@@ -618,6 +628,42 @@ class SuzuBridge:
             self._recent_requests.popitem(last=False)
         return False
 
+    def _remember_catalog(
+        self, scope: str, capabilities: Dict[str, Any], session_id: str
+    ) -> None:
+        """按会话保存桌面端最近同步的动作目录与选择策略，供插件端展示。"""
+        catalog = capabilities.get("actionCatalog")
+        policy = capabilities.get("actionPolicy")
+        if not (isinstance(catalog, dict) and catalog) and not (
+            isinstance(policy, dict) and policy
+        ):
+            return
+        entry: Dict[str, Any] = {
+            "scope": scope,
+            "sessionId": session_id,
+            "at": _iso_now(),
+            "policy": policy if isinstance(policy, dict) else {},
+            "version": catalog.get("version") if isinstance(catalog, dict) else 0,
+            "motions": catalog.get("motions", []) if isinstance(catalog, dict) else [],
+            "expressions": catalog.get("expressions", [])
+            if isinstance(catalog, dict)
+            else [],
+            "intents": catalog.get("intents", []) if isinstance(catalog, dict) else [],
+            "whitelist": {
+                "motions": capabilities.get("motions", []),
+                "intents": capabilities.get("intents", []),
+                "expressions": capabilities.get("expressions", []),
+            },
+        }
+        self._action_catalogs[scope] = entry
+        self._action_catalogs.move_to_end(scope)
+        while len(self._action_catalogs) > 32:
+            self._action_catalogs.popitem(last=False)
+
+    def catalogs_view(self) -> List[Dict[str, Any]]:
+        """插件 WebUI 展示用：最近同步的动作目录，最新在前。"""
+        return list(reversed(self._action_catalogs.values()))
+
     def _prune_action_records(self, now: float) -> None:
         expired = [
             key
@@ -736,7 +782,7 @@ class SuzuBridge:
         provider = self._proactive_provider()
         return provider is not None and self._provider_supports_image(provider)
 
-    def _success_response(
+    async def _success_response(
         self,
         *,
         request_id: str,
@@ -747,20 +793,16 @@ class SuzuBridge:
         vision_used: bool,
         warnings: List[str],
         capabilities: Dict[str, Any],
+        user_text: str = "",
     ) -> web.Response:
-        """统一构造 v2 成功响应，同时保留旧版 live2d 字段"""
+        """统一构造聊天响应：动作由规划器按动作目录选择，不做任何情绪映射。"""
         reply = _clip(reply, 12000)
         emotion = str(self.plugin.current_emotion or "")
         affinity = self.plugin.data_manager.get_user_affinity(user_id, nickname)
-        live2d = self.settings.build_live2d_control(emotion, affinity, reply)
-        actions = self.settings.build_actions(
-            capabilities,
-            str(live2d.get("expression", "")),
-            str(live2d.get("motion", "")),
-        )
-        # 桌面端声明行为序列时，服务端把动作与发言排成"先动作后发言"的计划；
-        # 存在 sequence 时它就是唯一执行计划，reply/actions 仅作兼容。
-        sequence = derive_sequence(actions, reply, capabilities)
+        sequence: List[Dict[str, Any]] = []
+        if uses_action_catalog(capabilities):
+            sequence = await self._plan_chat_actions(capabilities, reply, user_text)
+        actions = sequence_actions(sequence) if sequence else []
         if request_id:
             self._remember_actions(scope, request_id, actions, sequence)
         body: Dict[str, Any] = {
@@ -773,17 +815,44 @@ class SuzuBridge:
             "visionUsed": bool(vision_used),
             "actions": actions,
             "warnings": list(warnings),
-            "live2d": live2d,
         }
+        # 存在 sequence 时它是唯一执行计划，reply/actions 仅作兼容。
         if sequence:
             body.update(sequenceVersion=1, sequence=sequence)
-            body["live2d"]["supports"] = [
-                "expression",
-                "motion",
-                "segments",
-                "behaviorSequence",
-            ]
         return _json(body)
+
+    async def _plan_chat_actions(
+        self, capabilities: Dict[str, Any], reply: str, user_text: str
+    ) -> List[Dict[str, Any]]:
+        """聊天第二阶段：只决定动作与顺序，发言固定使用主 Agent 的完整回复。"""
+        if capabilities.get("features", {}).get("behaviorSequence") is not True:
+            return []
+        planner, prompt = self._companion_planner()
+        if planner is None:
+            planner = self._proactive_provider()
+        if planner is None:
+            logger.warning("[Fiscok's][suzu] 没有可用的行为规划 Provider，本次只返回文字")
+            return []
+        try:
+            planned = await plan_sequence(
+                planner,
+                capabilities=capabilities,
+                draft=reply,
+                user_text=user_text,
+                planner_prompt=prompt,
+                proactive=False,
+            )
+        except ValueError as exc:
+            logger.warning(f"[Fiscok's][suzu] 聊天动作规划不可用: {exc}")
+            return [{"type": "say", "text": reply}]
+        except Exception as exc:
+            logger.warning(
+                f"[Fiscok's][suzu] 聊天动作规划失败: {type(exc).__name__}: {exc}"
+            )
+            return [{"type": "say", "text": reply}]
+        # 草稿就是最终回复，规划器只负责动作部分，发言由服务端固定补上。
+        actions = [step for step in planned if step["type"] == "action"]
+        return actions + [{"type": "say", "text": reply}]
 
     # ---------------- 路由 ----------------
 
@@ -800,6 +869,7 @@ class SuzuBridge:
                     "proactiveVisionInput": self._proactive_vision_available(),
                     "structuredActions": True,
                     "actionReceipts": True,
+                    "actionCatalog": True,
                     "proactiveEvents": True,
                 },
                 "time": _iso_now(),
@@ -856,17 +926,6 @@ class SuzuBridge:
                     "count": len(memories),
                     "items": [self._memory_item(item) for item in memories[:20]],
                 },
-                "live2d": {
-                    "expressions": [
-                        {
-                            "keywords": item.get("keywords", []),
-                            "expression": item.get("expression", ""),
-                            "motion": item.get("motion", ""),
-                        }
-                        for item in self.settings.data.get("expression_map", [])
-                    ],
-                    "supports": ["expression", "motion", "segments"],
-                },
                 "features": features,
             }
         )
@@ -921,6 +980,12 @@ class SuzuBridge:
         environment = payload.get("environment")
         environment_summary = self._environment_summary(environment)
         image_base64, warnings = self._parse_image(environment)
+        # 动作目录按会话隔离保存，模型切换时同一会话被覆盖，供插件端展示。
+        self._remember_catalog(
+            self._scope_key(session_id),
+            capabilities,
+            session_id,
+        )
 
         # 同一身份 + 会话串行；requestId 五分钟内只处理一次，重复请求直接拒绝。
         scope = self._scope_key(session_id)
@@ -1003,7 +1068,7 @@ class SuzuBridge:
 
         self.last_chat_at = _iso_now()
         # 管线里的插件钩子已经记录演化对话、调度情绪分析并累计计数，这里不再重复记录。
-        return self._success_response(
+        return await self._success_response(
             request_id=request_id,
             scope=scope,
             reply=reply,
@@ -1012,6 +1077,7 @@ class SuzuBridge:
             vision_used=vision_used,
             warnings=warnings,
             capabilities=capabilities,
+            user_text=text,
         )
 
     async def _chat_direct(
@@ -1116,7 +1182,7 @@ class SuzuBridge:
         except Exception as exc:
             logger.warning(f"[Fiscok's][suzu] 记录桌面对话/情绪失败: {exc}")
 
-        return self._success_response(
+        return await self._success_response(
             request_id=request_id,
             scope=scope,
             reply=reply,
@@ -1125,6 +1191,7 @@ class SuzuBridge:
             vision_used=vision_used,
             warnings=warnings,
             capabilities=capabilities,
+            user_text=text,
         )
 
     async def _action_result(self, request: web.Request) -> web.Response:
@@ -1258,6 +1325,13 @@ class SuzuBridge:
                 "sessionId": session_id,
                 "instanceId": instance_id,
             }
+        if isinstance(payload.get("capabilities"), dict):
+            self._remember_catalog(
+                f"companion/{identity}/{session_id or 'default'}"
+                f"@{instance_id or '-'}",
+                normalize_capabilities(payload.get("capabilities")),
+                str(session_id or ""),
+            )
         return _json(response)
 
     def _companion_planner(self) -> Tuple[Any, str]:
