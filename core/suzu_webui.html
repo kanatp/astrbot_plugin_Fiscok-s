@@ -494,6 +494,38 @@
       .catalog-head .hint { margin: 0; display: inline; }
       .catalog-line { margin-top: 3px; color: #4a4357; word-break: break-all; }
       .catalog-line b { margin-right: 6px; color: #8a6fae; font-weight: 600; }
+      .prompt-list { display: grid; gap: 14px; }
+      .prompt-item {
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: #fcfaff;
+      }
+      .prompt-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+      .prompt-head h3 { margin: 0; font-size: 13px; color: #5c4a72; }
+      .prompt-head .hint { margin: 4px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.6; }
+      .prompt-item textarea {
+        width: 100%;
+        min-height: 108px;
+        padding: 11px 13px;
+        border-radius: 12px;
+        border: 1px solid var(--line);
+        background: #fff;
+        outline: none;
+        font-size: 12.5px;
+        line-height: 1.7;
+        resize: vertical;
+      }
+      .prompt-item textarea:focus {
+        border-color: #ffc9dd;
+        box-shadow: 0 0 0 3px rgba(255, 159, 196, 0.16);
+      }
       .live2d-form .actions {
         grid-column: 1 / -1;
         display: flex;
@@ -548,6 +580,7 @@
       <nav class="tabs" id="tabs">
         <button class="tab" type="button" data-target="overview">概览</button>
         <button class="tab" type="button" data-target="live2d">Live2D</button>
+        <button class="tab" type="button" data-target="prompts">提示词</button>
         <button class="tab" type="button" data-target="memory">记忆</button>
         <button class="tab" type="button" data-target="memes">表情包</button>
         <button class="tab" type="button" data-target="emotion">情绪好感</button>
@@ -821,6 +854,21 @@
           <div id="affinity-list" class="affinity-list"></div>
         </section>
 
+        <section class="card col-12" data-tab="prompts">
+          <div class="card-head">
+            <div>
+              <h2>提示词库</h2>
+              <p class="hint">统一维护桌面端发言、触摸回应、动作规划与人设压缩提示词；只在本页生效，不出现在 AstrBot 插件配置中。清空文本保存即恢复默认。</p>
+            </div>
+            <div class="head-actions">
+              <button id="prompts-reload" class="mini-btn" type="button">重新读取</button>
+              <button id="prompts-save" class="btn" type="button">保存提示词</button>
+            </div>
+          </div>
+          <div id="prompt-list" class="prompt-list"><div class="hint">正在读取提示词…</div></div>
+          <div class="msg" id="prompts-msg"></div>
+        </section>
+
         <section class="card col-12" data-tab="config">
           <div class="card-head">
             <div>
@@ -1044,6 +1092,7 @@
       const TAB_KEY = 'fiscok-webui-tab'
       let currentTab = 'overview'
       let live2dLoaded = false
+      let promptsLoaded = false
 
       function switchTab(name) {
         const tabs = [...document.querySelectorAll('#tabs [data-target]')]
@@ -1058,6 +1107,9 @@
         } catch {}
         if (name === 'live2d' && !live2dLoaded) {
           loadLive2D().catch((error) => setMsg('live2d-msg', error.message, 'error'))
+        }
+        if (name === 'prompts' && !promptsLoaded) {
+          loadPrompts().catch((error) => setMsg('prompts-msg', error.message, 'error'))
         }
       }
 
@@ -1193,6 +1245,62 @@
           refresh().catch(() => {})
           loadLive2D().catch(() => {})
         }, 1800)
+      }
+
+      function renderPrompts(items) {
+        const box = $('prompt-list')
+        if (!items.length) {
+          box.innerHTML = '<div class="hint">提示词库为空。</div>'
+          return
+        }
+        box.innerHTML = items
+          .map(
+            (item) =>
+              '<div class="prompt-item" data-prompt="' + esc(item.key) + '">' +
+                '<div class="prompt-head"><div><h3>' + esc(item.title) + '</h3>' +
+                '<p class="hint">' + esc(item.hint) + '</p></div>' +
+                '<button class="mini-btn" type="button" data-prompt-reset="' + esc(item.key) + '">恢复默认</button></div>' +
+                '<textarea data-prompt-text="' + esc(item.key) + '"></textarea>' +
+              '</div>'
+          )
+          .join('')
+        items.forEach((item) => {
+          const textarea = box.querySelector('[data-prompt-text="' + item.key + '"]')
+          if (textarea) textarea.value = item.text || ''
+          const holder = box.querySelector('[data-prompt="' + item.key + '"]')
+          if (holder) holder.dataset.default = item.default || ''
+        })
+      }
+
+      async function loadPrompts() {
+        const data = await api('/ui/api/prompts')
+        renderPrompts(data.items || [])
+        promptsLoaded = true
+        setMsg('prompts-msg', '已读取提示词', 'ok')
+      }
+
+      async function savePrompts() {
+        const values = {}
+        document.querySelectorAll('#prompt-list [data-prompt-text]').forEach((node) => {
+          values[node.dataset.promptText] = node.value
+        })
+        if (!Object.keys(values).length) {
+          setMsg('prompts-msg', '没有可保存的提示词', 'error')
+          return
+        }
+        $('prompts-save').disabled = true
+        try {
+          const data = await api('/ui/api/prompts', {
+            method: 'POST',
+            body: JSON.stringify({ values })
+          })
+          renderPrompts(data.items || [])
+          setMsg('prompts-msg', '提示词已保存，下一轮调用立即生效', 'ok')
+        } catch (error) {
+          setMsg('prompts-msg', error.message, 'error')
+        } finally {
+          $('prompts-save').disabled = false
+        }
       }
 
       async function loadMemes() {
@@ -1825,11 +1933,26 @@
         loadLive2D().catch((error) => setMsg('live2d-msg', error.message, 'error'))
       )
       $('live2d-restart').addEventListener('click', restartBridge)
+      $('prompts-save').addEventListener('click', savePrompts)
+      $('prompts-reload').addEventListener('click', () =>
+        loadPrompts().catch((error) => setMsg('prompts-msg', error.message, 'error'))
+      )
       document.querySelectorAll('#tabs [data-target]').forEach((tab) =>
         tab.addEventListener('click', () => switchTab(tab.dataset.target))
       )
 
       document.addEventListener('click', (event) => {
+        const promptReset = event.target.closest('[data-prompt-reset]')
+        if (promptReset) {
+          const key = promptReset.dataset.promptReset
+          const holder = document.querySelector('#prompt-list [data-prompt="' + key + '"]')
+          const textarea = document.querySelector('#prompt-list [data-prompt-text="' + key + '"]')
+          if (holder && textarea) {
+            textarea.value = holder.dataset.default || ''
+            setMsg('prompts-msg', '已填入默认文本，点击保存后生效', 'ok')
+          }
+          return
+        }
         const memeDelete = event.target.closest('[data-meme-delete]')
         if (memeDelete) {
           deleteMeme(memeDelete.dataset.memeDelete)

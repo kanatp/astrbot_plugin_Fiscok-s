@@ -34,6 +34,7 @@ from .core.prompts import (
     PERSONAL_MEMORY_CATEGORY_LABELS,
     TOPIC_TRACKING_REPLY_INJECTION,
 )
+from .core.prompt_library import PromptLibrary
 from .core.net.twitter_fetch import fetch_twitter_data, check_availability
 from .core.net.instagram_fetch import create_loader, fetch_instagram_posts, fetch_instagram_stories, check_instagram_access
 
@@ -81,7 +82,7 @@ def _strip_internal_leaks(text: str) -> str:
     return text
 
 
-@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "2.8")
+@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "2.9")
 class Core(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -90,6 +91,8 @@ class Core(Star):
         self.config = config
         self.plugin_data_path = get_astrbot_data_path() + "/plugin_data/" + self.name
         self.data_manager = DataManager(self.plugin_data_path, config)
+        # 提示词库：只由插件 WebUI 维护，不进入 AstrBot 插件配置
+        self.prompt_library = PromptLibrary(self)
 
         # 模型自身的全局情绪状态（运行时变量，文字描述，不持久化）
         self.current_emotion = str(config.get('emotion_config', {}).get('emotion_init', '平静'))
@@ -812,6 +815,7 @@ class Core(Star):
                 current_persona=self._persona_overlay,
                 dialogue=dialogue,
                 max_chars=max_chars,
+                compress_prompt=self.prompt_library.get('persona_compress'),
             )
             if not result or not result.get('changed'):
                 return
@@ -2199,6 +2203,7 @@ class Core(Star):
             current_persona=self._persona_overlay,
             dialogue=dialogue,
             max_chars=int(persona_config.get('max_chars', 200) or 200),
+            compress_prompt=self.prompt_library.get('persona_compress'),
         )
         if not result:
             yield event.plain_result("演化失败（模型不可用或返回内容无法解析），请查看日志")

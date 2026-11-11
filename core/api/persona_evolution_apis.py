@@ -12,10 +12,13 @@ from ..prompts import (
     PERSONA_EVOLUTION_SYSTEM_PROMPT,
     format_persona_evolution_prompt,
 )
+from ..prompt_library import default_prompt
 from .provider_utils import get_aux_provider
 
 # 人设演化使用偏高的温度，允许措辞与偏好上有一点变化
 PERSONA_EVOLUTION_TEMPERATURE = 1.0
+# 压缩只做删减归纳，保持稳定
+PERSONA_COMPRESS_TEMPERATURE = 0.2
 
 
 def _extract_json(result_text: str) -> Optional[dict]:
@@ -37,6 +40,46 @@ def _extract_json(result_text: str) -> Optional[dict]:
             return None
 
 
+async def _compress_persona(
+    provider,
+    persona: str,
+    max_chars: int,
+    compress_prompt: str = '',
+    timeout: float = 20.0,
+) -> str:
+    """让人设压缩到字数上限内；模型不可用或结果为空才回退截断。"""
+    instruction = (compress_prompt or '').strip() or default_prompt('persona_compress')
+    try:
+        response = await asyncio.wait_for(
+            provider.text_chat(
+                prompt=f"目标字数：{max_chars}\n自我设定：\n{persona}",
+                system_prompt=instruction,
+                temperature=PERSONA_COMPRESS_TEMPERATURE,
+            ),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("[Fiscok's][persona] 人设压缩超时，回退到截断")
+        return persona[:max_chars]
+    except Exception as e:
+        logger.warning(f"[Fiscok's][persona] 人设压缩失败，回退到截断: {e}")
+        return persona[:max_chars]
+
+    text = getattr(response, 'completion_text', '')
+    if not isinstance(text, str):
+        text = response if isinstance(response, str) else ''
+    text = text.strip().strip('"“”\'`').strip()
+    if not text:
+        logger.warning("[Fiscok's][persona] 人设压缩返回空内容，回退到截断")
+        return persona[:max_chars]
+    if len(text) > max_chars:
+        logger.warning(
+            f"[Fiscok's][persona] 压缩结果仍超出上限（{len(text)} > {max_chars}），按上限截断"
+        )
+        text = text[:max_chars]
+    return text
+
+
 async def evolve_persona(
     context: Context,
     provider_id: str = '',
@@ -44,6 +87,7 @@ async def evolve_persona(
     dialogue: str = '',
     max_chars: int = 200,
     timeout: float = 25.0,
+    compress_prompt: str = '',
 ) -> Optional[Dict]:
     """
     让模型基于近期对话小幅演化自我设定
@@ -77,7 +121,10 @@ async def evolve_persona(
         if not persona:
             return None
         if max_chars > 0 and len(persona) > max_chars:
-            persona = persona[:max_chars]
+            # 超出上限时交给模型压缩，保留语义而不是直接裁掉后半段
+            persona = await _compress_persona(
+                provider, persona, max_chars, compress_prompt, timeout=min(timeout, 20.0)
+            )
 
         changed = bool(data.get('changed', False))
         # 文本完全没变视为未变化，避免无意义的重复写入

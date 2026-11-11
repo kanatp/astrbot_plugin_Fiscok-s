@@ -45,6 +45,7 @@ from .companion_router import (
     normalize_capabilities,
     plan_sequence,
 )
+from .prompt_library import PromptLibrary
 from .suzu_settings import Live2DSettings
 from .prompts import (
     format_emotion_state_injection,
@@ -133,6 +134,8 @@ class SuzuBridge:
         self.port = int(self.config.get("port") or 6199)
         self.settings = Live2DSettings(plugin)
         self.apply_settings(self.settings.data)
+        # 提示词库由插件持有；单独实例化时也能直接读数据目录
+        self.prompts = getattr(plugin, "prompt_library", None) or PromptLibrary(plugin)
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
         self._started = False
@@ -1294,7 +1297,8 @@ class SuzuBridge:
             return _error("请求体必须为 JSON 对象", 400, "INVALID_INPUT")
         identity = self.memory_user_id
         provider = self._proactive_provider()
-        planner_provider, planner_prompt = self._companion_planner()
+        planner_provider, _ = self._companion_planner()
+        nickname = self.default_nickname
         try:
             response = await self.companion_router.sync(
                 payload,
@@ -1307,7 +1311,14 @@ class SuzuBridge:
                 ),
                 save_proactive=self._save_proactive,
                 planner_provider=planner_provider,
-                planner_prompt=planner_prompt,
+                prompts={
+                    "proactive_speech": self.prompts.get("proactive_speech"),
+                    "touch_reply": self.prompts.get("touch_reply"),
+                    "behavior_planner": self.prompts.get("behavior_planner"),
+                },
+                affinity=self.plugin.data_manager.get_user_affinity(identity, nickname),
+                emotion=str(self.plugin.current_emotion or ""),
+                nickname=nickname,
             )
         except ValueError as exc:
             return _error(str(exc), 400, "INVALID_INPUT")
@@ -1335,9 +1346,9 @@ class SuzuBridge:
         return _json(response)
 
     def _companion_planner(self) -> Tuple[Any, str]:
-        """主动行为规划用的 Provider 与独立提示词，来自插件配置 companion_config。"""
+        """主动行为规划用的 Provider（插件配置）与提示词（插件 WebUI 提示词库）。"""
         section = self.plugin.config.get("companion_config", {}) or {}
-        prompt = str(section.get("planner_prompt") or "").strip()
+        prompt = self.prompts.get("behavior_planner")
         provider = None
         provider_id = str(section.get("planner_provider_id") or "").strip()
         if provider_id:
@@ -1543,6 +1554,7 @@ class SuzuBridge:
                     dialogue=dialogue,
                     max_chars=int(cfg.get("max_chars", 200) or 200),
                     timeout=30.0,
+                    compress_prompt=self.prompts.get("persona_compress"),
                 )
             except Exception as exc:
                 logger.error(f"[Fiscok's][suzu] 手动人设演化失败: {exc}", exc_info=True)

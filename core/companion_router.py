@@ -26,6 +26,7 @@ from .behavior_sequence import (
     validate_execution,
     validate_sequence,
 )
+from .prompt_library import default_prompt
 
 PROTOCOL_VERSION = 1
 
@@ -67,24 +68,86 @@ PROVIDER_EVENTS = {
 
 RECEIPT_STATUS = ("accepted", "suppressed", "rejected", "cancelled")
 
-# 第一阶段：只负责按人设说一句话，不要在这里要求 JSON（格式交给第二阶段）。
-PROACTIVE_PROMPT = (
-    "系统主动陪伴机会（不是用户消息）。请结合提供的屏幕参考内容、事件与会话，"
-    "自主决定要不要说一句话；想保持安静时只输出空内容。只有提供了屏幕资料才能据此回应，"
-    "不要重复打扰，一句话即可，不要解释你在做什么。\n"
-)
+# 模型触摸：沿用 interaction.click + data.name=model.touch，部位标签由服务端按标准表重算。
+TOUCH_PARTS = {
+    "hair": "头发",
+    "cheek": "脸颊",
+    "face": "脸部",
+    "eye": "眼睛",
+    "nose": "鼻子",
+    "mouth": "嘴部",
+    "ear": "耳朵",
+    "head_accessory": "头部饰品",
+    "neck": "颈部",
+    "chest": "胸部",
+    "shoulder": "肩膀",
+    "upper_arm": "大臂",
+    "forearm": "小臂",
+    "hand": "手",
+    "abdomen": "腹部",
+    "pelvis": "骨盆附近",
+    "thigh": "大腿",
+    "calf": "小腿",
+    "foot": "足",
+    "clothing": "衣物",
+}
+TOUCH_SIDES = ("left", "right", "center")
+TOUCH_SURFACES = ("skin", "clothing", "accessory")
 
-# 第二阶段（把发言草稿编排成行为序列）的内置提示词，可在插件配置里覆盖。
-DEFAULT_PLANNER_PROMPT = (
-    "你是行为计划生成器，不与人对话，也不改写别人的话。输入包含 mode、桌面能力表"
-    "（白名单 + actionCatalog 动作目录）与一段已经写好的发言草稿 draft。"
-    "请决定要做哪些动作、按什么顺序执行，并在需要时安排发言步骤。"
-    "mode=chat 时 draft 是最终回复，必须原样作为 say 步骤；mode=proactive 时可以精简 draft 或整体保持安静。"
-    "必须只输出一个 JSON 对象，禁止任何自然语言、解释、前后缀或 markdown 代码块。"
-    '格式：{"sequenceVersion":1,"sequence":[...]}；没有合适的动作时只返回 say；'
-    '完全不需要行动时输出 {"sequenceVersion":1,"sequence":[]}。'
-    "动作只能使用 actionCatalog 里的 name，不要用 title 代替，名字不得自创。"
-)
+
+def _touch_payload(event: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """识别触摸事件并只保留标准字段；不是合法触摸返回 None。"""
+    if event.get("type") != "interaction.click":
+        return None
+    data = event.get("data")
+    if not isinstance(data, dict) or data.get("name") != "model.touch":
+        return None
+    part = str(data.get("part") or "").strip()
+    if part not in TOUCH_PARTS:
+        return None
+    side = str(data.get("side") or "").strip()
+    surface = str(data.get("surface") or "").strip()
+    return {
+        "part": part,
+        "partLabel": TOUCH_PARTS[part],
+        "side": side if side in TOUCH_SIDES else "center",
+        "surface": surface if surface in TOUCH_SURFACES else "skin",
+    }
+
+
+def _event_payload(
+    event: Dict[str, Any], touch: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """给 Provider 的事件资料；触摸只传标准字段，避免任意标签进入提示词。"""
+    payload: Dict[str, Any] = {
+        "type": event.get("type"),
+        "id": event.get("id"),
+        "at": event.get("at"),
+    }
+    if touch:
+        payload["data"] = {"name": "model.touch", **touch}
+    elif isinstance(event.get("data"), dict):
+        payload["data"] = event["data"]
+    return payload
+
+
+def _action_hints(capabilities: Dict[str, Any]) -> Dict[str, List[str]]:
+    """给第一阶段一句话提供可参考的动作名与标题（动作本身仍由第二阶段决定）。"""
+    catalog = capabilities.get("actionCatalog") or {}
+    hints: Dict[str, List[str]] = {}
+    for key in ("motions", "expressions", "intents"):
+        entries = catalog.get(key) if isinstance(catalog, dict) else None
+        if not isinstance(entries, list) or not entries:
+            entries = [{"name": name} for name in capabilities.get(key, [])]
+        items: List[str] = []
+        for entry in entries[:40]:
+            if not isinstance(entry, dict) or not entry.get("name"):
+                continue
+            title = entry.get("title")
+            items.append(f"{entry['name']}（{title}）" if title else str(entry["name"]))
+        if items:
+            hints[key] = items
+    return hints
 
 MAX_SCOPES = 128
 MAX_EVENTS = 512
@@ -270,6 +333,9 @@ async def plan_sequence(
     session_id: str = "",
     planner_prompt: str = "",
     proactive: bool = False,
+    can_speak: Optional[bool] = None,
+    affinity: Optional[int] = None,
+    emotion: str = "",
     timeout: float = 8.0,
 ) -> List[Dict[str, Any]]:
     """第二阶段：把发言草稿、用户输入与动作目录交给规划模型，返回校验过的序列。"""
@@ -284,6 +350,12 @@ async def plan_sequence(
     }
     if user_text:
         payload["userText"] = str(user_text)[:2000]
+    if can_speak is not None:
+        payload["can_speak"] = bool(can_speak)
+    if affinity is not None:
+        payload["affinity"] = int(affinity)
+    if emotion:
+        payload["emotion"] = str(emotion)[:100]
     if event:
         payload["event"] = event
     if environment:
@@ -294,7 +366,7 @@ async def plan_sequence(
             if isinstance(environment.get("window"), dict)
             else {},
         }
-    instruction = ((planner_prompt or "").strip() or DEFAULT_PLANNER_PROMPT) + "\n" + (
+    instruction = ((planner_prompt or "").strip() or default_prompt("behavior_planner")) + "\n" + (
         PROACTIVE_SEQUENCE_NOTE if proactive else PASSIVE_SEQUENCE_NOTE
     )
     response = await asyncio.wait_for(
@@ -552,7 +624,10 @@ class CompanionRouter:
         decide: Optional[Callable[..., Awaitable[Optional[dict]]]] = None,
         save_proactive: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
         planner_provider: Any = None,
-        planner_prompt: str = "",
+        prompts: Optional[Dict[str, str]] = None,
+        affinity: int = 0,
+        emotion: str = "",
+        nickname: str = "",
     ) -> Dict[str, Any]:
         """处理一次同步：确认事件/回执，按事件与预算决定是否下发新指令。"""
         if not isinstance(body, dict):
@@ -666,7 +741,10 @@ class CompanionRouter:
                     image_urls=image_urls if environment else None,
                     decide=decide,
                     planner_provider=planner_provider,
-                    planner_prompt=planner_prompt,
+                    prompts=prompts,
+                    affinity=affinity,
+                    emotion=emotion,
+                    nickname=nickname,
                 )
 
             pending = [
@@ -726,7 +804,10 @@ class CompanionRouter:
         image_urls: Optional[List[str]],
         decide: Optional[Callable[..., Awaitable[Optional[dict]]]],
         planner_provider: Any = None,
-        planner_prompt: str = "",
+        prompts: Optional[Dict[str, str]] = None,
+        affinity: int = 0,
+        emotion: str = "",
+        nickname: str = "",
     ) -> None:
         candidates = [event for event in new_events if event["type"] in EVENT_PRIORITY]
         if not candidates:
@@ -800,7 +881,10 @@ class CompanionRouter:
                 image_urls,
                 key,
                 planner_provider=planner_provider,
-                planner_prompt=planner_prompt,
+                prompts=prompts,
+                affinity=affinity,
+                emotion=emotion,
+                nickname=nickname,
             )
             if generated is not None:
                 decision.update(generated)
@@ -869,15 +953,36 @@ class CompanionRouter:
         image_urls: Optional[List[str]],
         key: Tuple[str, str, str],
         planner_provider: Any = None,
-        planner_prompt: str = "",
+        prompts: Optional[Dict[str, str]] = None,
+        affinity: int = 0,
+        emotion: str = "",
+        nickname: str = "",
     ) -> Optional[Dict[str, Any]]:
         """两次调用：先按人设生成发言草稿，再交给独立提示词把草稿规划成 JSON 序列。"""
+        prompts = prompts or {}
+        touch = _touch_payload(event)
+        event_view = _event_payload(event, touch)
         draft = ""
         if can_speak:
-            prompt = PROACTIVE_PROMPT + json.dumps(
-                {"event": event, "can_speak": True, "desktop_capabilities": capabilities},
-                ensure_ascii=False,
-            )
+            prompt_key = "touch_reply" if touch else "proactive_speech"
+            prompt = (prompts.get(prompt_key) or default_prompt(prompt_key)).strip()
+            payload: Dict[str, Any] = {
+                "event": event_view,
+                "can_speak": True,
+                "affinity": affinity,
+                "emotion": emotion or "平静",
+            }
+            if nickname:
+                payload["nickname"] = nickname
+            if touch:
+                # 触摸：部位、关系（好感度/情绪）与可用动作一并交给第一阶段
+                payload["touch"] = touch
+                payload["available_actions"] = _action_hints(capabilities)
+            else:
+                payload["desktop_capabilities"] = capabilities
+            if not prompt.endswith("\n"):
+                prompt += "\n"
+            prompt += json.dumps(payload, ensure_ascii=False)
             if environment:
                 prompt += environment_reference(environment)
             try:
@@ -900,8 +1005,10 @@ class CompanionRouter:
                     completion = response if isinstance(response, str) else ""
                 draft = completion.strip()[:400]
             if not draft:
-                # 第一阶段已经决定保持安静，不再进入规划。
-                return {"text": ""}
+                # 普通主动机会保持安静就不再规划；触摸即使不说话也允许只做一个反应动作。
+                if not touch:
+                    return {"text": ""}
+        speak_allowed = bool(can_speak and draft)
 
         planner = planner_provider or provider
         try:
@@ -909,12 +1016,15 @@ class CompanionRouter:
                 planner,
                 capabilities=capabilities,
                 draft=draft,
-                event=event,
+                event=event_view,
                 environment=environment,
                 contexts=contexts,
                 session_id=f"{key[0]}/{key[1]}",
-                planner_prompt=planner_prompt,
+                planner_prompt=prompts.get("behavior_planner", ""),
                 proactive=True,
+                can_speak=speak_allowed,
+                affinity=affinity,
+                emotion=emotion,
             )
         except ValueError as exc:
             self.log(
@@ -931,7 +1041,7 @@ class CompanionRouter:
         if not sequence:
             # 规划器明确选择保持安静
             return {"text": ""}
-        if not can_speak:
+        if not speak_allowed:
             sequence = [step for step in sequence if step["type"] != "say"]
             if not sequence:
                 return {"text": ""}

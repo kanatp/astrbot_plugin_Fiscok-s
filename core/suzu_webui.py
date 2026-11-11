@@ -225,6 +225,8 @@ class SuzuWebUI:
         app.router.add_get("/ui/api/live2d", self._live2d_get)
         app.router.add_post("/ui/api/live2d", self._live2d_set)
         app.router.add_post("/ui/api/live2d/restart", self._live2d_restart)
+        app.router.add_get("/ui/api/prompts", self._prompts_get)
+        app.router.add_post("/ui/api/prompts", self._prompts_set)
 
     async def _page(self, request: web.Request) -> web.Response:
         return web.Response(
@@ -947,6 +949,25 @@ class SuzuWebUI:
             max_=meta["max"],
         )
         return _json({"ok": True, "affinity": result.get("affinity", affinity)})
+
+    # ---------------- 提示词库 ----------------
+
+    async def _prompts_get(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        return _json({"ok": True, "items": self.bridge.prompts.view()})
+
+    async def _prompts_set(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        payload = await _read_json(request)
+        values = payload.get("values")
+        if not isinstance(values, dict) or not values:
+            return _json({"ok": False, "error": "没有可保存的提示词"}, 400)
+        self.bridge.prompts.save(values)
+        return _json({"ok": True, "items": self.bridge.prompts.view()})
 
     # ---------------- Live2D 设置 ----------------
 
