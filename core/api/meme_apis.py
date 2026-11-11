@@ -6,7 +6,8 @@ from typing import Dict, Optional
 
 from astrbot.api import logger
 from astrbot.core.star.context import Context
-from ..prompts import MEME_DESCRIPTION_PROMPT, MEME_DESCRIPTION_SYSTEM_PROMPT, EMOTION_MAP, VALID_EMOTIONS
+from ..prompts import EMOTION_MAP, VALID_EMOTIONS
+from ..prompt_library import get_prompt
 from .provider_utils import get_aux_provider
 
 
@@ -37,9 +38,9 @@ async def generate_meme_description(
 
         # 调用 LLM 进行图片描述
         response = await provider.text_chat(
-            prompt=MEME_DESCRIPTION_PROMPT,
+            prompt=get_prompt('meme_description_prompt'),
             image_urls=[image_path],
-            system_prompt=MEME_DESCRIPTION_SYSTEM_PROMPT
+            system_prompt=get_prompt('meme_description_system')
         )
 
         if not response or not response.completion_text:

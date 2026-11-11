@@ -12,9 +12,9 @@ from astrbot.core.star.context import Context
 
 from ..prompts import (
     PERSONAL_MEMORY_CATEGORY_LABELS,
-    PERSONAL_MEMORY_EXTRACTION_SYSTEM_PROMPT,
     format_personal_memory_extraction_prompt,
 )
+from ..prompt_library import get_prompt
 from .provider_utils import get_aux_provider
 from .emotion_apis import _extract_json
 from .topic_memory_apis import _cosine
@@ -80,7 +80,7 @@ async def extract_personal_memories(
         response = await asyncio.wait_for(
             provider.text_chat(
                 prompt=prompt,
-                system_prompt=PERSONAL_MEMORY_EXTRACTION_SYSTEM_PROMPT,
+                system_prompt=get_prompt('personal_memory_extraction_system'),
                 temperature=MEMORY_EXTRACTION_TEMPERATURE,
             ),
             timeout=timeout,

@@ -8,11 +8,8 @@ from typing import Dict, Optional
 from astrbot.api import logger
 from astrbot.core.star.context import Context
 
-from ..prompts import (
-    PERSONA_EVOLUTION_SYSTEM_PROMPT,
-    format_persona_evolution_prompt,
-)
-from ..prompt_library import default_prompt
+from ..prompts import format_persona_evolution_prompt
+from ..prompt_library import default_prompt, get_prompt
 from .provider_utils import get_aux_provider
 
 # 人设演化使用偏高的温度，允许措辞与偏好上有一点变化
@@ -104,7 +101,7 @@ async def evolve_persona(
         response = await asyncio.wait_for(
             provider.text_chat(
                 prompt=prompt,
-                system_prompt=PERSONA_EVOLUTION_SYSTEM_PROMPT,
+                system_prompt=get_prompt('persona_evolution_system'),
                 temperature=PERSONA_EVOLUTION_TEMPERATURE,
             ),
             timeout=timeout,

@@ -11,10 +11,8 @@ from astrbot.api import logger
 from astrbot.core.star.context import Context
 from astrbot.core.provider.provider import EmbeddingProvider
 
-from ..prompts import (
-    TOPIC_MEMORY_ANALYSIS_SYSTEM_PROMPT,
-    format_topic_memory_analysis_prompt,
-)
+from ..prompts import format_topic_memory_analysis_prompt
+from ..prompt_library import get_prompt
 from .provider_utils import get_aux_provider
 from .emotion_apis import _extract_json
 
@@ -106,7 +104,7 @@ async def extract_topic_memories(
                 prompt=format_topic_memory_analysis_prompt(
                     nickname, message, "\n".join(lines), max_ops, sender_id
                 ),
-                system_prompt=TOPIC_MEMORY_ANALYSIS_SYSTEM_PROMPT,
+                system_prompt=get_prompt('topic_memory_analysis_system'),
                 temperature=TOPIC_DECISION_TEMPERATURE,
             ),
             timeout=timeout,

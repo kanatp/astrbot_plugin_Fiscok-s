@@ -8,7 +8,8 @@ from typing import Dict, Optional
 
 from astrbot.api import logger
 from astrbot.core.star.context import Context
-from ..prompts import EMOTION_ANALYSIS_SYSTEM_PROMPT, format_emotion_analysis_prompt
+from ..prompts import format_emotion_analysis_prompt
+from ..prompt_library import get_prompt
 from .provider_utils import get_aux_provider
 
 
@@ -85,7 +86,7 @@ async def analyze_emotion_state(
         # 调用 LLM 进行情绪/好感度分析
         response = await provider.text_chat(
             prompt=format_emotion_analysis_prompt(current_emotion, nickname, message),
-            system_prompt=EMOTION_ANALYSIS_SYSTEM_PROMPT,
+            system_prompt=get_prompt('emotion_analysis_system'),
             temperature=temperature,
         )
 

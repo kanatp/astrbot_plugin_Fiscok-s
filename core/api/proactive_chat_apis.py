@@ -5,10 +5,10 @@ from astrbot.api import logger
 from astrbot.core.star.context import Context
 
 from ..prompts import (
-    PROACTIVE_CHAT_SYSTEM_PROMPT,
     format_proactive_chat_prompt,
     format_private_proactive_chat_prompt,
 )
+from ..prompt_library import get_prompt
 from .provider_utils import get_aux_provider
 
 # 主动发起聊天（冷场救场）：
@@ -55,7 +55,7 @@ async def generate_proactive_message(
             logger.warning("[Fiscok's][proactive] 未找到可用的 LLM Provider，跳过主动发言")
             return None
 
-        system_prompt = PROACTIVE_CHAT_SYSTEM_PROMPT
+        system_prompt = get_prompt('proactive_chat_system')
         if persona_prompt and persona_prompt.strip():
             system_prompt = f"{persona_prompt.strip()}\n\n{system_prompt}"
 

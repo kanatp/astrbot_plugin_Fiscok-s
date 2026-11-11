@@ -68,50 +68,29 @@ PROVIDER_EVENTS = {
 
 RECEIPT_STATUS = ("accepted", "suppressed", "rejected", "cancelled")
 
-# 模型触摸：沿用 interaction.click + data.name=model.touch，部位标签由服务端按标准表重算。
-TOUCH_PARTS = {
-    "hair": "头发",
-    "cheek": "脸颊",
-    "face": "脸部",
-    "eye": "眼睛",
-    "nose": "鼻子",
-    "mouth": "嘴部",
-    "ear": "耳朵",
-    "head_accessory": "头部饰品",
-    "neck": "颈部",
-    "chest": "胸部",
-    "shoulder": "肩膀",
-    "upper_arm": "大臂",
-    "forearm": "小臂",
-    "hand": "手",
-    "abdomen": "腹部",
-    "pelvis": "骨盆附近",
-    "thigh": "大腿",
-    "calf": "小腿",
-    "foot": "足",
-    "clothing": "衣物",
-}
-TOUCH_SIDES = ("left", "right", "center")
-TOUCH_SURFACES = ("skin", "clothing", "accessory")
+# 模型触摸：沿用 interaction.click + data.name=model.touch。
+# 部位名称由桌面端直接传入，这里不做枚举校验，改名/新增部位无需改插件。
+TOUCH_FIELD_LIMIT = 60
 
 
 def _touch_payload(event: Dict[str, Any]) -> Optional[Dict[str, str]]:
-    """识别触摸事件并只保留标准字段；不是合法触摸返回 None。"""
+    """识别触摸事件并透传桌面端提供的部位信息；不是合法触摸返回 None。"""
     if event.get("type") != "interaction.click":
         return None
     data = event.get("data")
     if not isinstance(data, dict) or data.get("name") != "model.touch":
         return None
-    part = str(data.get("part") or "").strip()
-    if part not in TOUCH_PARTS:
+    part = str(data.get("part") or "").strip()[:TOUCH_FIELD_LIMIT]
+    if not part:
         return None
-    side = str(data.get("side") or "").strip()
-    surface = str(data.get("surface") or "").strip()
+    label = str(data.get("partLabel") or "").strip()[:TOUCH_FIELD_LIMIT]
+    side = str(data.get("side") or "").strip()[:TOUCH_FIELD_LIMIT]
+    surface = str(data.get("surface") or "").strip()[:TOUCH_FIELD_LIMIT]
     return {
         "part": part,
-        "partLabel": TOUCH_PARTS[part],
-        "side": side if side in TOUCH_SIDES else "center",
-        "surface": surface if surface in TOUCH_SURFACES else "skin",
+        "partLabel": label or part,
+        "side": side or "center",
+        "surface": surface or "skin",
     }
 
 

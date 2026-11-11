@@ -9,7 +9,8 @@ from typing import Dict, List, Optional
 from astrbot.api import logger
 from astrbot.core.star.context import Context
 
-from ..prompts import TOPIC_TRACKING_SYSTEM_PROMPT, format_topic_tracking_prompt
+from ..prompts import format_topic_tracking_prompt
+from ..prompt_library import get_prompt
 from .provider_utils import get_aux_provider
 from .emotion_apis import _extract_json
 
@@ -60,7 +61,7 @@ async def decide_topic_continuation(
                     nickname,
                     message,
                 ),
-                system_prompt=TOPIC_TRACKING_SYSTEM_PROMPT,
+                system_prompt=get_prompt('topic_tracking_system'),
                 temperature=TOPIC_TRACKING_TEMPERATURE,
             ),
             timeout=timeout,

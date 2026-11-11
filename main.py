@@ -32,9 +32,8 @@ from .core.prompts import (
     format_topic_memory_injection,
     format_personal_memory_injection,
     PERSONAL_MEMORY_CATEGORY_LABELS,
-    TOPIC_TRACKING_REPLY_INJECTION,
 )
-from .core.prompt_library import PromptLibrary
+from .core.prompt_library import PromptLibrary, get_prompt
 from .core.net.twitter_fetch import fetch_twitter_data, check_availability
 from .core.net.instagram_fetch import create_loader, fetch_instagram_posts, fetch_instagram_stories, check_instagram_access
 
@@ -416,7 +415,7 @@ class Core(Star):
         yield event.request_llm(
             prompt=message,
             conversation=conversation,
-            system_prompt=TOPIC_TRACKING_REPLY_INJECTION,
+            system_prompt=get_prompt('topic_tracking_reply_injection'),
         )
 
     @filter.event_message_type(filter.EventMessageType.ALL)
