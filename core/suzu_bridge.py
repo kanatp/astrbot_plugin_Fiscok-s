@@ -510,8 +510,13 @@ class SuzuBridge:
         return self._qq_private_umo() or umo
 
     def _persona_umos(self, user_id: str) -> List[tuple]:
-        """基线只用 AstrBot 默认/指定人格，不把 QQ 会话人格当作基线。"""
-        return [("", self._umo(user_id))]
+        """基线只用 AstrBot 默认/指定人格；绑定 QQ 时复用该账号私聊会话的 umo。"""
+        return [("", self._qq_private_umo() or self._umo(user_id))]
+
+    def _shared_umo(self) -> str:
+        """桌面端与指定 QQ 用户共用的会话 umo（绑定后就是该账号真实私聊会话）。"""
+        platform_id, _, _ = self._pipeline_target()
+        return f"{platform_id}:FriendMessage:{self.memory_user_id}"
 
     @staticmethod
     def _persona_fields(persona: Any) -> Dict[str, str]:
@@ -1097,7 +1102,8 @@ class SuzuBridge:
         scope: str,
     ) -> web.Response:
         """插件直连 Provider 的旧链路，仅在使用本页配置的链路时启用。"""
-        umo = self._umo(user_id)
+        # 与 QQ/桌面其它链路共用同一个会话 umo
+        umo = self._shared_umo()
         vision_used = False
 
         try:
@@ -1140,7 +1146,21 @@ class SuzuBridge:
             if environment_summary:
                 system_parts.append(f"<桌面环境>\n{environment_summary}\n</桌面环境>")
 
-            contexts = self._history_contexts(payload.get("history"))
+            # 与正常对话共用话题记忆（个人记忆已由上方 _match_memories 注入）
+            knowledge = await self.plugin.knowledge_injection(
+                umo,
+                text,
+                nickname=nickname,
+                is_group=False,
+                owner_id=user_id,
+                include_personal=False,
+            )
+            if knowledge:
+                system_parts.append(knowledge)
+
+            contexts = await self.plugin.conversation_contexts(umo, limit=20)
+            if not contexts:
+                contexts = self._history_contexts(payload.get("history"))
             provider = resolve_provider(self.plugin.context, self.llm_provider_id)
             if provider is None:
                 return _error("AstrBot 没有可用的文本 Provider", 503, "NOT_CONFIGURED")
@@ -1184,6 +1204,13 @@ class SuzuBridge:
             self._record_dialogue(umo, user_id, nickname, text, reply)
         except Exception as exc:
             logger.warning(f"[Fiscok's][suzu] 记录桌面对话/情绪失败: {exc}")
+
+        # 直连链路不经过 AstrBot 管线，这里手动写回，保证与 QQ/后续对话共享上下文
+        try:
+            await self.plugin.append_history(umo, "user", text)
+            await self.plugin.append_history(umo, "assistant", reply)
+        except Exception as exc:
+            logger.warning(f"[Fiscok's][suzu] 写回直连对话失败: {exc}")
 
         return await self._success_response(
             request_id=request_id,
@@ -1299,13 +1326,29 @@ class SuzuBridge:
         provider = self._proactive_provider()
         planner_provider, _ = self._companion_planner()
         nickname = self.default_nickname
+        contexts = await self._conversation_contexts()
+        query = next(
+            (item["content"] for item in reversed(contexts) if item["role"] == "user"),
+            "",
+        )
+        system_prompt = await self._proactive_system_prompt()
+        # 与正常对话共用同一份知识库（话题记忆/个人记忆）
+        knowledge = await self.plugin.knowledge_injection(
+            self._shared_umo(),
+            query,
+            nickname=nickname,
+            is_group=False,
+            owner_id=identity,
+        )
+        if knowledge:
+            system_prompt = f"{system_prompt}\n\n{knowledge}".strip()
         try:
             response = await self.companion_router.sync(
                 payload,
                 authenticated_identity=identity,
                 provider=provider,
-                system_prompt=await self._proactive_system_prompt(),
-                contexts=[],
+                system_prompt=system_prompt,
+                contexts=contexts,
                 image_urls=await self._companion_images(
                     payload.get("environment"), provider
                 ),
@@ -1423,7 +1466,7 @@ class SuzuBridge:
         cached_text, cached_at = self._proactive_prompt_cache
         if cached_text and now - cached_at < 60.0:
             return cached_text
-        umo = self._umo(self.memory_user_id)
+        umo = self._shared_umo()
         try:
             baseline = await self._baseline_persona(self.memory_user_id, umo)
         except Exception as exc:
@@ -1446,6 +1489,14 @@ class SuzuBridge:
         self._proactive_prompt_cache = (prompt, now)
         return prompt
 
+    async def _conversation_contexts(self, limit: int = 16) -> List[Dict[str, str]]:
+        """读取与桌面正常聊天同一份 AstrBot 会话历史（仅文字），供主动发言参考。"""
+        try:
+            return await self.plugin.conversation_contexts(self._shared_umo(), limit=limit)
+        except Exception as exc:
+            logger.warning(f"[Fiscok's][suzu] 读取会话上下文失败: {exc}")
+            return []
+
     async def _save_proactive(self, scope: str, command_id: str, text: str) -> None:
         """把已接受的主动话语写回 AstrBot 同一会话历史，按 command_id 幂等。"""
         text = _clip(text, 400)
@@ -1455,8 +1506,7 @@ class SuzuBridge:
         while len(self._saved_proactive) > RECEIPT_MAX:
             self._saved_proactive.popitem(last=False)
 
-        platform_id, _, _ = self._pipeline_target()
-        umo = f"{platform_id}:FriendMessage:{self.memory_user_id}"
+        umo = self._shared_umo()
         try:
             manager = self.plugin.context.conversation_manager
             conversation_id = await manager.get_curr_conversation_id(umo)

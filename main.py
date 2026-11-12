@@ -3,7 +3,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api.provider import ProviderRequest
 from astrbot.api import logger, AstrBotConfig
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-from astrbot.api.message_components import Node, Plain, Image, Nodes, Reply, Forward
+from astrbot.api.message_components import Node, Plain, Image, Nodes, Reply, Forward, At
 
 from .core.api.bili_apis import get_bvid
 from .core.api.storage_apis import DataManager
@@ -40,6 +40,7 @@ from .core.net.instagram_fetch import create_loader, fetch_instagram_posts, fetc
 import subprocess
 import asyncio
 import random
+import sys
 import time
 import aiohttp
 import aiofiles
@@ -48,6 +49,9 @@ from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from typing import List, Dict, Any, Optional
 import re
+
+# @ 机器人后等待用户下一条消息的时长（秒），与核心的等待窗口保持一致
+MENTION_WAIT_SECONDS = 60
 
 # 回复贴表情：常用 QQ 表情 ID（OneBot face 段），配置里用中文名或直接写数字 ID
 FACE_PRESETS = {
@@ -117,6 +121,9 @@ class Core(Star):
         # 连续消息合并：同一会话中短期内连发的几条消息（仅内存驻留）
         self._merge_pending: Dict[str, Dict] = {}
 
+        # @ 后的等待窗口：核心等待要等首次回复生成完才注册，这里提前登记补上空窗
+        self._mention_waiting: Dict[str, tuple] = {}
+
         # 人设演化：插件侧可演化、可回滚的“自我设定”，与原生人设叠加注入
         self._persona_overlay = str(self.data_manager.get_evolved_persona().get('persona', '') or '')
         self._persona_recent: Dict[str, List[str]] = {}
@@ -176,6 +183,9 @@ class Core(Star):
         # 主动发起聊天：周期性检查冷场群聊
         self._spawn_background(self._proactive_loop())
 
+        # 话题跟踪：后台巡检空闲超时，避免没有新消息时话题一直不结束
+        self._spawn_background(self._topic_session_loop())
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def meme_learn_on_message(self, event: AstrMessageEvent):
         """
@@ -229,6 +239,62 @@ class Core(Star):
             self.data_manager.get_user_affinity(sender_id, event.get_sender_name())
         except Exception as e:
             logger.warning(f"[Fiscok's][emotion] 初始化用户好感度失败: {e}")
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=sys.maxsize)
+    async def empty_mention_wait_on_message(self, event: AstrMessageEvent):
+        """
+        @ 机器人后进入“等待下一条消息”窗口。
+
+        核心实现的等待要等首次回复生成完成后才注册，用户抢在回复前发下一条
+        （尤其语音/图片这类没有文字的消息）会漏掉；这里在收到 @ 的当下就登记，
+        把这段空窗补上。仅当核心的 empty_mention_waiting 开启时生效。
+        """
+        try:
+            umo = event.unified_msg_origin
+            sender_id = event.get_sender_id()
+            if not sender_id or sender_id == event.get_self_id():
+                return
+
+            try:
+                astrbot_config = self.context.get_config(umo=umo)
+            except Exception:
+                return
+            if not astrbot_config.get('platform_settings', {}).get('empty_mention_waiting', True):
+                return
+
+            now = time.time()
+            pending = self._mention_waiting.get(umo)
+            if pending:
+                if now - pending[1] > MENTION_WAIT_SECONDS:
+                    self._mention_waiting.pop(umo, None)
+                elif pending[0] == sender_id:
+                    # 同一个人在下一条消息里没带 @：补一次唤醒
+                    self._mention_waiting.pop(umo, None)
+                    if not event.is_at_or_wake_command:
+                        event.is_at_or_wake_command = True
+                        event.is_wake = True
+                        logger.info(f"[Fiscok's][wait] @ 后的下一条消息已唤醒：{umo}")
+
+            # 本条本身就是“只有 @”或“只有唤醒前缀”：登记等待
+            messages = event.get_messages()
+            if len(messages) != 1:
+                return
+            component = messages[0]
+            is_empty_mention = isinstance(component, At) and str(component.qq) == str(event.get_self_id())
+            if not is_empty_mention:
+                wake_prefix = astrbot_config.get('wake_prefix', [])
+                if isinstance(wake_prefix, str):
+                    wake_prefix = [wake_prefix]
+                text = str(getattr(component, 'text', '') or '').strip()
+                is_empty_mention = isinstance(component, Plain) and bool(text) and text in [
+                    str(prefix) for prefix in wake_prefix if str(prefix)
+                ]
+            if is_empty_mention:
+                self._mention_waiting[umo] = (sender_id, now)
+                while len(self._mention_waiting) > 500:
+                    self._mention_waiting.pop(next(iter(self._mention_waiting)))
+        except Exception as e:
+            logger.warning(f"[Fiscok's][wait] 处理 @ 等待窗口失败: {e}")
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def topic_learn_on_message(self, event: AstrMessageEvent):
@@ -370,6 +436,10 @@ class Core(Star):
         # 判定失败时不发言，避免误触发
         if not decision:
             logger.info(f"[Fiscok's][track] 判定无结果，跳过本次发言：{nickname}：{message[:40]}")
+            return
+
+        # 判定期间话题可能已被后台巡检结束
+        if self._topic_sessions.get(umo) is not session:
             return
 
         logger.info(
@@ -1050,6 +1120,41 @@ class Core(Star):
         if self._topic_sessions.pop(umo, None) is not None:
             logger.info(f"[Fiscok's][track] 结束话题跟踪（{reason}）")
 
+    async def _topic_session_loop(self):
+        """
+        话题跟踪的后台巡检：没有新消息时也按时结束会话。
+
+        之前的超时只在收到新消息时惰性判断，群里安静下来后话题永远不会结束；
+        这里每 5 秒扫一次，空闲超时与无关内容计时都能真正触发。
+        """
+        while self.running:
+            try:
+                await asyncio.sleep(5)
+                self._sweep_topic_sessions()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[Fiscok's][track] 话题会话巡检失败: {e}")
+
+    def _sweep_topic_sessions(self):
+        """按配置结束空闲/长期未续上的话题会话"""
+        track_config = self.config.get('topic_tracking_config', {})
+        if not track_config.get('available', False) or not self._topic_sessions:
+            return
+
+        ttl = float(track_config.get('ttl_seconds', 90) or 0)
+        idle_end = float(track_config.get('unrelated_end_seconds', 180) or 0)
+        now = time.time()
+        for umo, session in list(self._topic_sessions.items()):
+            if ttl > 0 and now - session.get('last_active', 0) > ttl:
+                self._end_topic_session(umo, '空闲超时')
+                continue
+            idle_since = session.get('idle_since') or 0
+            if idle_end > 0 and idle_since and now - idle_since >= idle_end:
+                self._end_topic_session(
+                    umo, f'无关内容持续 {now - idle_since:.0f}s 未续上'
+                )
+
     async def _get_or_create_conversation(self, event: AstrMessageEvent):
         """
         获取当前群聊对话，不存在时创建，用于续聊时复用上下文
@@ -1062,6 +1167,181 @@ class Core(Star):
                 umo, platform_id=event.get_platform_id()
             )
         return await manager.get_conversation(umo, conversation_id)
+
+    @staticmethod
+    def _history_text(content: Any) -> str:
+        """从会话历史 content 中提取纯文字，跳过图片/工具等非文本块"""
+        if isinstance(content, str):
+            return content.strip()
+        if not isinstance(content, list):
+            return ''
+        parts: List[str] = []
+        for block in content:
+            if isinstance(block, str):
+                text = block.strip()
+            elif isinstance(block, dict) and block.get('type') == 'text':
+                text = str(block.get('text') or '').strip()
+            else:
+                text = ''
+            if text:
+                parts.append(text)
+        return '\n'.join(parts).strip()
+
+    async def conversation_contexts(self, umo: str, limit: int = 16) -> List[Dict[str, str]]:
+        """
+        读取 AstrBot 同一会话的最近历史（仅文字）。
+
+        主动发言不是由主流程触发的，但它应该和正常对话共用一份上下文，
+        因此生成前从这里取近期对话，发送后再写回同一份历史。
+        """
+        if not umo:
+            return []
+        try:
+            manager = self.context.conversation_manager
+            conversation_id = await manager.get_curr_conversation_id(umo)
+            if not conversation_id:
+                return []
+            conversation = await manager.get_conversation(umo, conversation_id)
+            history = json.loads(conversation.history) if conversation and conversation.history else []
+        except Exception as e:
+            logger.warning(f"[Fiscok's][context] 读取会话历史失败: {e}")
+            return []
+        if not isinstance(history, list):
+            return []
+
+        contexts: List[Dict[str, str]] = []
+        for record in history[-(limit * 2):]:
+            if not isinstance(record, dict):
+                continue
+            role = record.get('role')
+            if role not in ('user', 'assistant'):
+                continue
+            text = self._history_text(record.get('content'))
+            if text:
+                contexts.append({'role': role, 'content': text})
+        return contexts[-limit:]
+
+    async def _append_assistant_history(self, umo: str, text: str) -> None:
+        """把主动发言写回 AstrBot 同一会话历史，保证后续正常对话能看到这句话"""
+        await self.append_history(umo, 'assistant', text)
+
+    async def append_history(self, umo: str, role: str, text: str) -> None:
+        """往 AstrBot 会话历史追加一条消息（role 仅接受 user/assistant）"""
+        text = (text or '').strip()
+        if not text or role not in ('user', 'assistant'):
+            return
+        try:
+            manager = self.context.conversation_manager
+            conversation_id = await manager.get_curr_conversation_id(umo)
+            history: List[Dict[str, Any]] = []
+            if conversation_id:
+                conversation = await manager.get_conversation(umo, conversation_id)
+                if conversation and conversation.history:
+                    history = json.loads(conversation.history)
+                    if not isinstance(history, list):
+                        history = []
+            elif role == 'user':
+                # 用户首次发言时才创建会话，避免主动发言凭空造出一条空对话
+                conversation_id = await manager.new_conversation(
+                    umo, platform_id=umo.split(':', 1)[0]
+                )
+            else:
+                return
+            history.append({'role': role, 'content': text, 'timestamp': int(time.time())})
+            await manager.update_conversation(umo, conversation_id, history=history)
+        except Exception as e:
+            logger.warning(f"[Fiscok's][context] 写回会话历史失败: {e}")
+
+    async def knowledge_injection(
+        self,
+        umo: str,
+        query: str,
+        nickname: str = '',
+        is_group: bool = False,
+        owner_id: str = '',
+        include_personal: bool = True,
+    ) -> str:
+        """
+        用与主对话相同的规则检索话题记忆/个人记忆，返回可拼进 system_prompt 的文本。
+
+        主动发言、桌面直连等不经过 on_llm_request 的链路都调用它，
+        从而与正常对话共享同一份知识库。
+        """
+        query = (query or '').strip()
+        parts: List[str] = []
+
+        topic_config = self.config.get('topic_memory_config', {})
+        if query and topic_config.get('available', False):
+            try:
+                provider_id = topic_config.get('embedding_provider_id', '')
+                if resolve_embedding_provider(self.context, provider_id) is not None:
+                    query_vector = await get_text_embedding(self.context, provider_id, query)
+                    topics = self.data_manager.get_topics(umo) if query_vector else []
+                    if topics:
+                        matched = retrieve_topics(
+                            topics,
+                            query_vector,
+                            top_k=topic_config.get('retrieve_top_k', 3),
+                            min_similarity=topic_config.get('min_similarity', 0.5),
+                        )
+                        max_chars = int(topic_config.get('max_content_chars', 60) or 0)
+                        max_injection_chars = int(topic_config.get('max_injection_chars', 200) or 0)
+                        items = []
+                        total_chars = 0
+                        for topic in matched:
+                            text = str(topic.get('text', '')).strip()
+                            if not text:
+                                continue
+                            if max_chars > 0 and len(text) > max_chars:
+                                text = text[:max_chars] + '…'
+                            if max_injection_chars > 0 and total_chars + len(text) > max_injection_chars:
+                                break
+                            items.append({
+                                'text': text,
+                                'owner_id': str(topic.get('owner_id', '') or ''),
+                            })
+                            total_chars += len(text)
+                        injection = format_topic_memory_injection(items, show_owner=is_group)
+                        if injection:
+                            parts.append(injection)
+            except Exception as e:
+                logger.warning(f"[Fiscok's][topic] 主动链路检索话题记忆失败: {e}")
+
+        personal_config = self.config.get('personal_memory_config', {})
+        if include_personal and owner_id and not is_group and query and personal_config.get('available', False):
+            try:
+                embedding_provider_id = personal_config.get('embedding_provider_id', '')
+                if resolve_embedding_provider(self.context, embedding_provider_id) is not None:
+                    query_vector = await get_text_embedding(self.context, embedding_provider_id, query)
+                    memories = self.data_manager.get_personal_memories(owner_id) if query_vector else []
+                    if memories:
+                        matched = retrieve_memories(
+                            memories,
+                            query_vector,
+                            top_k=int(personal_config.get('retrieve_top_k', 4) or 4),
+                            min_similarity=float(personal_config.get('min_similarity', 0.45) or 0.45),
+                        )
+                        max_item_chars = int(personal_config.get('max_item_chars', 60) or 0)
+                        max_injection_chars = int(personal_config.get('max_injection_chars', 220) or 0)
+                        items = []
+                        total_chars = 0
+                        for memory in matched:
+                            text = str(memory.get('text', '')).strip()
+                            if not text:
+                                continue
+                            if max_item_chars > 0 and len(text) > max_item_chars:
+                                text = text[:max_item_chars] + '…'
+                            if max_injection_chars > 0 and total_chars + len(text) > max_injection_chars:
+                                break
+                            items.append({'category': memory.get('category', ''), 'text': text})
+                            total_chars += len(text)
+                        injection = format_personal_memory_injection(nickname or '对方', items)
+                        if injection:
+                            parts.append(injection)
+            except Exception as e:
+                logger.warning(f"[Fiscok's][memory] 主动链路检索个人记忆失败: {e}")
+
+        return '\n\n'.join(parts)
 
     # --- 主动发起聊天 ---
 
@@ -1242,13 +1522,35 @@ class Core(Star):
             except Exception as e:
                 logger.warning(f"[Fiscok's][proactive] 处理群聊 {umo} 主动发言失败: {e}")
 
+    async def _recent_for_proactive(self, umo: str, cfg: Dict, is_private: bool) -> List[str]:
+        """
+        主动发言的近期上下文：优先用 AstrBot 同一会话历史（与正常聊天一致），
+        没有历史时回退到插件自己的最近消息缓冲。
+        """
+        max_chars = int(cfg.get('recent_line_chars', 80) or 0)
+        limit = int(cfg.get('recent_lines', 8) or 8)
+        lines: List[str] = []
+        try:
+            contexts = await self.conversation_contexts(umo, limit=limit)
+        except Exception:
+            contexts = []
+        for item in contexts:
+            speaker = '我' if item['role'] == 'assistant' else ('对方' if is_private else '群友')
+            text = item['content']
+            if max_chars > 0 and len(text) > max_chars:
+                text = text[:max_chars] + '…'
+            lines.append(f"{speaker}：{text}")
+        if not lines:
+            lines = list(self._group_recent.get(umo, []))
+        return lines
+
     async def _generate_proactive_text(self, umo: str, state: Dict, cfg: Dict) -> str:
         """结合人格、情绪、好感度、时间与会话记录生成一条主动消息"""
-        recent = list(self._group_recent.get(umo, []))
+        is_private = bool(state.get('is_private'))
+        recent = await self._recent_for_proactive(umo, cfg, is_private)
         if not recent:
             return ''
 
-        is_private = bool(state.get('is_private'))
         persona_prompt = ''
         try:
             persona_obj = await self.context.persona_manager.get_default_persona_v3(umo)
@@ -1274,6 +1576,25 @@ class Core(Star):
                 persona_prompt = f"{persona_prompt}\n\n你对 TA 的好感度：{affinity}/100".strip()
             except Exception:
                 pass
+
+        # 与正常对话共用同一份知识库：检索话题记忆/个人记忆
+        query = ''
+        for line in reversed(recent):
+            for prefix in ('对方：', '群友：'):
+                if line.startswith(prefix):
+                    query = line[len(prefix):]
+                    break
+            if query:
+                break
+        knowledge = await self.knowledge_injection(
+            umo,
+            query or (recent[-1] if recent else ''),
+            nickname=state.get('nickname', '') or '对方',
+            is_group=not is_private,
+            owner_id=str(state.get('sender_id') or ''),
+        )
+        if knowledge:
+            persona_prompt = f"{persona_prompt}\n\n{knowledge}".strip()
 
         text = await generate_proactive_message(
             self.context,
@@ -1323,6 +1644,8 @@ class Core(Star):
         logger.info(f"[Fiscok's][proactive] 主动发言：{text[:60]}")
         self._group_last_activity[umo] = time.time()
         self._append_group_line(umo, '我', text, cfg)
+        # 写回同一份 AstrBot 会话历史，后续正常对话和下一次主动发言都能看到
+        await self._append_assistant_history(umo, text)
 
         # 若开启了话题跟踪，把这次主动发言也作为一个话题起点（话题跟踪仅针对群聊）
         track_config = self.config.get('topic_tracking_config', {})
@@ -2439,6 +2762,7 @@ class Core(Star):
         self._group_recent.clear()
         self._proactive_states.clear()
         self._merge_pending.clear()
+        self._mention_waiting.clear()
         self._personal_memory_counters.clear()
         self._persona_recent.clear()
 
