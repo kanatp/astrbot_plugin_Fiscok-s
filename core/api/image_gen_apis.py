@@ -3,8 +3,7 @@ Venice AI 生图接口：
 - 文生图：POST /image/generate（JSON 请求，返回 base64 图片数组）
 - 图生图/编辑：POST /image/edit（JSON 请求，image 为参考图，返回原始图片字节）
 - mode 决定走哪个端点：edit 只走编辑、generate 只走文生图、
-  auto 按模型名分发（-edit 结尾走编辑，其余走文生图），
-  编辑模型没有参考图时自动去掉 -edit 后缀改用文生图模型
+  auto 按有无参考图分发（有图用基础模型 + -edit 走编辑，无图用基础模型走文生图）
 '''
 import asyncio
 import base64
@@ -302,8 +301,8 @@ async def generate_image(
     配置项：api_base / api_key / model / mode / size / edit_aspect_ratio /
             edit_resolution / prompt_prefix / timeout / keep_images /
             reference_enabled / reference_image / reference_strength
-    mode=auto（默认）时按模型名分发：名字以 -edit 结尾的走 /image/edit，
-    其余走 /image/generate；编辑模型没有参考图时，自动去掉 -edit 后缀改用文生图模型。
+    model 只需填基础模型 ID（如 seedream-v5-5），mode=auto（默认）时按有无参考图分发：
+    有参考图 → 模型名加 -edit 走 /image/edit；没有 → 基础模型走 /image/generate。
     """
     api_base = str(config.get('api_base') or '').strip().rstrip('/')
     model = str(config.get('model') or '').strip()
@@ -317,20 +316,20 @@ async def generate_image(
     if mode not in ('auto', 'edit', 'generate'):
         mode = 'auto'
 
+    # 兼容直接填了 xxx-edit 的配置：统一还原成基础模型 ID
+    base_model = model[:-len('-edit')] if model.lower().endswith('-edit') else model
+    edit_model = f"{base_model}-edit"
+
     has_reference = reference_image is not None and bool(config.get('reference_enabled', True))
     if mode == 'edit':
         if not has_reference:
             logger.warning("[Fiscok's][image] 生图模式为 edit 但没有可用参考图，跳过")
             return None
-        return await _request_edit(config, model, prompt, save_dir, reference_image)
+        return await _request_edit(config, edit_model, prompt, save_dir, reference_image)
     if mode == 'generate':
-        return await _request_generate(config, model, prompt, save_dir, reference_image)
+        return await _request_generate(config, base_model, prompt, save_dir, reference_image)
 
-    # auto：端点跟着模型名走
-    if model.lower().endswith('-edit'):
-        if has_reference:
-            return await _request_edit(config, model, prompt, save_dir, reference_image)
-        base_model = model[:-len('-edit')]
-        logger.info(f"[Fiscok's][image] 无参考图，{model} 自动改用文生图模型 {base_model}")
-        return await _request_generate(config, base_model, prompt, save_dir, None)
-    return await _request_generate(config, model, prompt, save_dir, reference_image)
+    # auto：有参考图走编辑模型，否则用基础模型文生图
+    if has_reference:
+        return await _request_edit(config, edit_model, prompt, save_dir, reference_image)
+    return await _request_generate(config, base_model, prompt, save_dir, reference_image)
