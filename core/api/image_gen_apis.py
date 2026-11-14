@@ -3,7 +3,8 @@ Venice AI 生图接口：
 - 文生图：POST /image/generate（JSON 请求，返回 base64 图片数组）
 - 图生图/编辑：POST /image/edit（JSON 请求，image 为参考图，返回原始图片字节）
 - mode 决定走哪个端点：edit 只走编辑、generate 只走文生图、
-  auto 有参考图时走编辑，否则退回文生图
+  auto 按模型名分发（-edit 结尾走编辑，其余走文生图），
+  编辑模型没有参考图时自动去掉 -edit 后缀改用文生图模型
 '''
 import asyncio
 import base64
@@ -134,6 +135,7 @@ def _auth_headers(api_key: str) -> Dict[str, str]:
 
 async def _request_generate(
     config: Dict[str, Any],
+    model: str,
     prompt: str,
     save_dir: Path,
     reference_image: Optional[Path],
@@ -141,7 +143,7 @@ async def _request_generate(
     """文生图：POST /image/generate，参考图通过 style_references 传入。"""
     image_format = str(config.get('format') or 'png').strip().lower() or 'png'
     payload: Dict[str, Any] = {
-        'model': str(config.get('model') or '').strip(),
+        'model': model,
         'prompt': prompt,
         'format': image_format,
         'variants': 1,
@@ -231,6 +233,7 @@ async def _request_generate(
 
 async def _request_edit(
     config: Dict[str, Any],
+    model: str,
     prompt: str,
     save_dir: Path,
     reference_image: Path,
@@ -244,7 +247,7 @@ async def _request_edit(
 
     mime = _SUFFIX_MIME.get(reference_image.suffix.lower(), 'image/png')
     payload: Dict[str, Any] = {
-        'model': str(config.get('model') or '').strip(),
+        'model': model,
         'prompt': prompt,
         'image': f"data:{mime};base64,{base64.b64encode(raw_image).decode()}",
         'safe_mode': bool(config.get('safe_mode', True)),
@@ -299,7 +302,8 @@ async def generate_image(
     配置项：api_base / api_key / model / mode / size / edit_aspect_ratio /
             edit_resolution / prompt_prefix / timeout / keep_images /
             reference_enabled / reference_image / reference_strength
-    mode=auto（默认）时，有参考图走 /image/edit，否则走 /image/generate。
+    mode=auto（默认）时按模型名分发：名字以 -edit 结尾的走 /image/edit，
+    其余走 /image/generate；编辑模型没有参考图时，自动去掉 -edit 后缀改用文生图模型。
     """
     api_base = str(config.get('api_base') or '').strip().rstrip('/')
     model = str(config.get('model') or '').strip()
@@ -313,12 +317,20 @@ async def generate_image(
     if mode not in ('auto', 'edit', 'generate'):
         mode = 'auto'
 
-    use_edit = mode == 'edit' or (
-        mode == 'auto' and reference_image is not None and config.get('reference_enabled', True)
-    )
-    if use_edit:
-        if reference_image is None:
+    has_reference = reference_image is not None and bool(config.get('reference_enabled', True))
+    if mode == 'edit':
+        if not has_reference:
             logger.warning("[Fiscok's][image] 生图模式为 edit 但没有可用参考图，跳过")
             return None
-        return await _request_edit(config, prompt, save_dir, reference_image)
-    return await _request_generate(config, prompt, save_dir, reference_image)
+        return await _request_edit(config, model, prompt, save_dir, reference_image)
+    if mode == 'generate':
+        return await _request_generate(config, model, prompt, save_dir, reference_image)
+
+    # auto：端点跟着模型名走
+    if model.lower().endswith('-edit'):
+        if has_reference:
+            return await _request_edit(config, model, prompt, save_dir, reference_image)
+        base_model = model[:-len('-edit')]
+        logger.info(f"[Fiscok's][image] 无参考图，{model} 自动改用文生图模型 {base_model}")
+        return await _request_generate(config, base_model, prompt, save_dir, None)
+    return await _request_generate(config, model, prompt, save_dir, reference_image)

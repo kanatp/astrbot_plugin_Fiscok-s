@@ -124,10 +124,10 @@
         "hint": "编辑类模型（如 seedream-v5-5-edit）走 /image/edit，文生图模型（如 venice-sd35、flux-dev）走 /image/generate；留空则不启用"
       },
       "mode": {
-        "description": "端点选择：auto 有参考图走编辑、否则文生图；edit 只走编辑；generate 只走文生图",
+        "description": "端点选择：auto 按模型名分发（-edit 结尾走编辑，其余走文生图）；edit 只走编辑；generate 只走文生图",
         "type": "string",
         "default": "auto",
-        "hint": "可选 auto / edit / generate。使用 seedream-v5-5-edit 这类编辑模型时保持 auto 或 edit"
+        "hint": "可选 auto / edit / generate。auto 下编辑模型没有参考图时，会自动去掉 -edit 后缀（如 seedream-v5-5-edit → seedream-v5-5）走文生图"
       },
       "size": {
         "description": "文生图尺寸：像素（如 1024x1024，宽高上限 1280）或比例（如 16:9）",
