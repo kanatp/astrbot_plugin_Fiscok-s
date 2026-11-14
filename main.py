@@ -24,9 +24,18 @@ from .core.api.personal_memory_apis import (
     find_similar_memory,
     retrieve_memories,
 )
+from .core.api.persona_image_apis import (
+    list_persona_images,
+    resolve_persona_image,
+    resolve_reference_image,
+    format_image_list,
+)
+from .core.api.image_gen_apis import generate_image
 from astrbot.core.message.message_event_result import MessageChain
 from .core.prompts import (
     format_meme_placeholder_injection,
+    format_persona_image_injection,
+    format_image_gen_injection,
     format_emotion_state_injection,
     format_persona_overlay_injection,
     format_topic_memory_injection,
@@ -123,6 +132,9 @@ class Core(Star):
 
         # @ 后的等待窗口：核心等待要等首次回复生成完才注册，这里提前登记补上空窗
         self._mention_waiting: Dict[str, tuple] = {}
+
+        # 桌面端被裁剪的图片/表情包意图：不进入可见文本，但交给动作规划器编排
+        self._suzu_clipped_tags: Dict[str, Dict[str, List[str]]] = {}
 
         # 人设演化：插件侧可演化、可回滚的“自我设定”，与原生人设叠加注入
         self._persona_overlay = str(self.data_manager.get_evolved_persona().get('persona', '') or '')
@@ -697,6 +709,53 @@ class Core(Star):
         if random.random() < attach_probability:
             placeholder_tag = meme_config.get('placeholder_tag', 'meme')
             req.system_prompt += format_meme_placeholder_injection(placeholder_tag)
+
+    @filter.on_llm_request()
+    async def on_llm_request_persona_image_hook(self, event: AstrMessageEvent, req: ProviderRequest):
+        """
+        把可用人设图清单注入提示词，让模型在对方想看立绘/照片时自行决定发图
+        """
+        image_config = self.config.get('persona_image_config', {})
+        if not image_config.get('available', False):
+            return
+        # 桌面端回复由桥接处理，不能把图片发到真实 QQ
+        if event.get_extra('_suzu_pipeline'):
+            return
+
+        try:
+            images = list_persona_images(Path(self.plugin_data_path), image_config)
+            if not images:
+                return
+            placeholder_tag = str(image_config.get('placeholder_tag') or 'pic').strip() or 'pic'
+            injection = format_persona_image_injection(
+                placeholder_tag,
+                format_image_list(images, image_config.get('max_items', 20)),
+            )
+            req.system_prompt = f"{req.system_prompt or ''}\n{injection}"
+        except Exception as e:
+            logger.warning(f"[Fiscok's][image] 注入人设图清单失败，不影响主请求: {e}")
+
+    @filter.on_llm_request()
+    async def on_llm_request_image_gen_hook(self, event: AstrMessageEvent, req: ProviderRequest):
+        """
+        注入生图占位符说明，让模型在对方想看画时触发生图 API
+        """
+        gen_config = self.config.get('image_gen_config', {})
+        if not gen_config.get('available', False):
+            return
+        if not str(gen_config.get('model') or '').strip():
+            return
+        if event.get_extra('_suzu_pipeline'):
+            return
+
+        try:
+            placeholder_tag = str(gen_config.get('placeholder_tag') or 'draw').strip() or 'draw'
+            injection = format_image_gen_injection(
+                placeholder_tag, gen_config.get('max_per_turn', 1)
+            )
+            req.system_prompt = f"{req.system_prompt or ''}\n{injection}"
+        except Exception as e:
+            logger.warning(f"[Fiscok's][image] 注入生图说明失败，不影响主请求: {e}")
 
     @filter.on_llm_request()
     async def on_llm_request_emotion_hook(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -1965,6 +2024,12 @@ class Core(Star):
 
             logger.info(f"[Fiscok's][meme] 发现 {len(matches)} 个表情包占位符: {matches}")
 
+            if event.get_extra('_suzu_pipeline'):
+                # 桌面端：表情包不随回复发出，但情绪标签交给动作规划器编排
+                self.remember_suzu_clipped(
+                    event.unified_msg_origin, memes=[m.strip() for m in matches]
+                )
+
             memes_to_send = []
             clean_text = completion_text
 
@@ -2003,6 +2068,100 @@ class Core(Star):
 
         except Exception as e:
             logger.error(f"[Fiscok's][meme] 处理 LLM 响应时出错: {e}", exc_info=True)
+
+    @filter.on_llm_response()
+    async def on_llm_response_image_hook(self, event: AstrMessageEvent, resp):
+        """
+        LLM 响应后处理：解析人设图与生图占位符，清理文本并登记待发送内容
+        """
+        # 桌面端不发图，但占位符仍要从可见文本里裁掉，意图交给动作规划器
+        is_suzu = bool(event.get_extra('_suzu_pipeline'))
+
+        text = getattr(resp, 'completion_text', '') or ''
+        if not text:
+            return
+
+        images_to_attach = []
+        draw_requests = []
+        patterns = []
+
+        try:
+            image_config = self.config.get('persona_image_config', {})
+            if image_config.get('available', False):
+                tag = str(image_config.get('placeholder_tag') or 'pic').strip() or 'pic'
+                pattern = rf'\[{re.escape(tag)}:(.+?)\]'
+                keys = re.findall(pattern, text)
+                if keys:
+                    images = list_persona_images(Path(self.plugin_data_path), image_config)
+                    for key in keys:
+                        image = resolve_persona_image(images, key)
+                        if not image:
+                            logger.info(f"[Fiscok's][image] 未匹配到人设图: {key}")
+                            continue
+                        images_to_attach.append(image['path'])
+                        logger.info(f"[Fiscok's][image] 已标记人设图待发送: {image['path']}")
+                    text = re.sub(pattern, '', text)
+                    patterns.append(pattern)
+
+            gen_config = self.config.get('image_gen_config', {})
+            if gen_config.get('available', False) and str(gen_config.get('model') or '').strip():
+                tag = str(gen_config.get('placeholder_tag') or 'draw').strip() or 'draw'
+                pattern = rf'\[{re.escape(tag)}:(.+?)\]'
+                limit = max(1, int(gen_config.get('max_per_turn', 1) or 1))
+                prompts = [item.strip() for item in re.findall(pattern, text) if item.strip()]
+                if prompts:
+                    draw_requests = prompts[:limit]
+                    text = re.sub(pattern, '', text)
+                    patterns.append(pattern)
+                    logger.info(f"[Fiscok's][image] 已登记生图请求 {len(draw_requests)} 个")
+
+            if not patterns:
+                return
+
+            resp.completion_text = re.sub(r'\n{3,}', '\n\n', text).strip()
+            self._strip_patterns_from_chain(resp, patterns)
+            if is_suzu:
+                # 桌面端不发送图片，直接把裁剪掉的意图交给动作规划器
+                self.remember_suzu_clipped(
+                    event.unified_msg_origin,
+                    persona_images=[Path(path).stem for path in images_to_attach],
+                    draw_prompts=draw_requests,
+                )
+            else:
+                if images_to_attach:
+                    event.set_extra('_images_to_attach', images_to_attach)
+                if draw_requests:
+                    event.set_extra('_draw_requests', draw_requests)
+        except Exception as e:
+            logger.error(f"[Fiscok's][image] 处理图片占位符时出错: {e}", exc_info=True)
+
+    @staticmethod
+    def _strip_patterns_from_chain(resp, patterns: List[str]):
+        """同步清理 result_chain 的 Plain 文本中的图片占位符"""
+        if not patterns or not getattr(resp, 'result_chain', None):
+            return
+        chain = getattr(resp.result_chain, 'chain', []) or []
+        for component in chain:
+            if isinstance(component, Plain):
+                for pattern in patterns:
+                    component.text = re.sub(pattern, '', component.text)
+                component.text = re.sub(r'\n{3,}', '\n\n', component.text).strip()
+
+    def remember_suzu_clipped(self, umo: str, **tags) -> None:
+        """记录桌面端被裁剪的图片/表情包意图，供动作规划器编排，不进入可见文本"""
+        if not umo:
+            return
+        bucket = self._suzu_clipped_tags.setdefault(umo, {})
+        for key, values in tags.items():
+            items = [str(item).strip() for item in (values or []) if str(item).strip()]
+            if items:
+                bucket[key] = items[:5]
+        while len(self._suzu_clipped_tags) > 200:
+            self._suzu_clipped_tags.pop(next(iter(self._suzu_clipped_tags)))
+
+    def take_suzu_clipped(self, umo: str) -> Dict[str, List[str]]:
+        """取走并清空桌面端被裁剪的意图（由桥接在动作规划前调用）"""
+        return self._suzu_clipped_tags.pop(umo, {}) or {}
 
     @filter.on_decorating_result()
     async def on_decorating_result_sanitize_hook(self, event: AstrMessageEvent):
@@ -2059,6 +2218,36 @@ class Core(Star):
 
         except Exception as e:
             logger.error(f"[Fiscok's][meme] 装饰消息链时出错: {e}", exc_info=True)
+
+    @filter.on_decorating_result()
+    async def on_decorating_result_image_hook(self, event: AstrMessageEvent):
+        """
+        发送前：把已登记的人设图单独发出，并把生图请求交给后台生成后发送
+        """
+        if event.get_extra('_suzu_pipeline'):
+            return
+
+        images = event.get_extra('_images_to_attach', [])
+        draws = event.get_extra('_draw_requests', [])
+        if not images and not draws:
+            return
+
+        try:
+            umo = event.unified_msg_origin
+            delay = float(
+                self.config.get('persona_image_config', {}).get('send_delay', 0.6) or 0
+            )
+            for image_path in images:
+                asyncio.create_task(
+                    self._send_image_separately(umo, image_path, '人设图', delay)
+                )
+            for prompt in draws:
+                asyncio.create_task(self._draw_and_send(umo, prompt))
+
+            event.set_extra('_images_to_attach', [])
+            event.set_extra('_draw_requests', [])
+        except Exception as e:
+            logger.error(f"[Fiscok's][image] 发送图片时出错: {e}", exc_info=True)
 
     @filter.on_decorating_result()
     async def on_decorating_result_split_hook(self, event: AstrMessageEvent):
@@ -2164,6 +2353,44 @@ class Core(Star):
                 logger.warning(f"[Fiscok's][meme] 表情包文件不存在，跳过: {meme_path}")
         except Exception as e:
             logger.error(f"[Fiscok's][meme] 单独发送表情包失败: {e}", exc_info=True)
+
+    async def _send_image_separately(
+        self, umo: str, image_path: str, label: str = '图片', delay: float = 0.5
+    ):
+        """延迟单独发送一张本地图片，确保文本消息先到达"""
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            path = Path(image_path)
+            if not path.exists():
+                logger.warning(f"[Fiscok's][image] {label}文件不存在，跳过: {image_path}")
+                return
+            chain = MessageChain(chain=[Image.fromFileSystem(str(path))])
+            await self.context.send_message(umo, chain)
+            logger.info(f"[Fiscok's][image] 已发送{label}: {image_path}")
+        except Exception as e:
+            logger.error(f"[Fiscok's][image] 发送{label}失败: {e}", exc_info=True)
+
+    async def _draw_and_send(self, umo: str, prompt: str):
+        """后台调用生图 API，成功后再单独发送生成结果"""
+        try:
+            config = self.config.get('image_gen_config', {})
+            reference = resolve_reference_image(
+                Path(self.plugin_data_path),
+                self.config.get('persona_image_config', {}),
+                config,
+            )
+            path = await generate_image(
+                config,
+                prompt,
+                Path(self.data_manager.generated_image_root),
+                reference_image=reference,
+            )
+            if path is None:
+                return
+            await self._send_image_separately(umo, str(path), '生成图', 0.8)
+        except Exception as e:
+            logger.error(f"[Fiscok's][image] 生成并发送图片失败: {e}", exc_info=True)
 
     # 临时测试用指令
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -2763,6 +2990,7 @@ class Core(Star):
         self._proactive_states.clear()
         self._merge_pending.clear()
         self._mention_waiting.clear()
+        self._suzu_clipped_tags.clear()
         self._personal_memory_counters.clear()
         self._persona_recent.clear()
 

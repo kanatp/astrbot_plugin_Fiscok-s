@@ -23,6 +23,9 @@ class DataManager:
         self.topic_memory_root = self.root / 'topic_memory'
         self.personal_memory_root = self.root / 'personal_memory'
         self.persona_root = self.root / 'persona'
+        # 人设图（手动放入）与实时生图缓存
+        self.persona_image_root = self.root / 'persona_images'
+        self.generated_image_root = self.root / 'generated_images'
 
         self.config = config
 
@@ -45,6 +48,8 @@ class DataManager:
             self.topic_memory_root.mkdir(parents=True, exist_ok=True)
             self.personal_memory_root.mkdir(parents=True, exist_ok=True)
             self.persona_root.mkdir(parents=True, exist_ok=True)
+            self.persona_image_root.mkdir(parents=True, exist_ok=True)
+            self.generated_image_root.mkdir(parents=True, exist_ok=True)
 
             logger.info('[DataManager] 已完成数据目录构建]')
         else:
@@ -56,6 +61,8 @@ class DataManager:
             self.topic_memory_root.mkdir(parents=True, exist_ok=True)
             self.personal_memory_root.mkdir(parents=True, exist_ok=True)
             self.persona_root.mkdir(parents=True, exist_ok=True)
+            self.persona_image_root.mkdir(parents=True, exist_ok=True)
+            self.generated_image_root.mkdir(parents=True, exist_ok=True)
 
     # --- bilibili视频统计基础组件 ---
     def _get_group_file(self, group_id: str) -> Path:

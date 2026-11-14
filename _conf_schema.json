@@ -43,6 +43,180 @@
       }
     }
   },
+  "persona_image_config": {
+    "description": "人设图（立绘）挂载：把角色图片显式绑定到人设，由模型在合适时机主动发送",
+    "type": "object",
+    "items": {
+      "available": {
+        "description": "是否启用人设图（把可用立绘清单注入提示词，模型按需输出 [标签:图ID]）",
+        "type": "bool",
+        "default": false
+      },
+      "image_dir": {
+        "description": "人设图目录（相对插件数据目录，也可填绝对路径）",
+        "type": "string",
+        "default": "persona_images",
+        "hint": "目录下的图片会自动收录，文件名（去扩展名）作为图 ID 与默认描述；下方「显式挂载」可补充更准确的描述"
+      },
+      "images": {
+        "description": "显式挂载的人设图（优先于目录扫描，可为同一文件补充描述）",
+        "type": "template_list",
+        "default": [],
+        "templates": {
+          "default": {
+            "name": "人设图",
+            "items": {
+              "file": {
+                "description": "图片文件名（相对人设图目录）或绝对路径",
+                "type": "string",
+                "default": ""
+              },
+              "description": {
+                "description": "一句话画面描述，供模型选图（如：小铃穿着居家服的微笑立绘）",
+                "type": "string",
+                "default": ""
+              }
+            }
+          }
+        }
+      },
+      "placeholder_tag": {
+        "description": "人设图占位符标签（模型输出 [标签:图ID] 时发送对应图片）",
+        "type": "string",
+        "default": "pic"
+      },
+      "max_items": {
+        "description": "注入提示词的人设图清单上限（超出按顺序截断）",
+        "type": "int",
+        "default": 20
+      },
+      "send_delay": {
+        "description": "图片相对文本消息的延迟发送时间（秒），确保文字先到达",
+        "type": "float",
+        "default": 0.6
+      }
+    }
+  },
+  "image_gen_config": {
+    "description": "生图 API（Venice AI /image/generate 与 /image/edit，模型判断对方想看画时调用）",
+    "type": "object",
+    "items": {
+      "available": {
+        "description": "是否启用生图（模型可在回复中输出 [标签:画面描述] 触发生成）",
+        "type": "bool",
+        "default": false
+      },
+      "api_base": {
+        "description": "Venice 接口基础地址（不含 /image/generate 或 /image/edit）",
+        "type": "string",
+        "default": "https://api.venice.ai/api/v1",
+        "hint": "默认 https://api.venice.ai/api/v1"
+      },
+      "api_key": {
+        "description": "生图接口密钥（Bearer Token）",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "生图模型名",
+        "type": "string",
+        "default": "seedream-v5-5-edit",
+        "hint": "编辑类模型（如 seedream-v5-5-edit）走 /image/edit，文生图模型（如 venice-sd35、flux-dev）走 /image/generate；留空则不启用"
+      },
+      "mode": {
+        "description": "端点选择：auto 有参考图走编辑、否则文生图；edit 只走编辑；generate 只走文生图",
+        "type": "string",
+        "default": "auto",
+        "hint": "可选 auto / edit / generate。使用 seedream-v5-5-edit 这类编辑模型时保持 auto 或 edit"
+      },
+      "size": {
+        "description": "文生图尺寸：像素（如 1024x1024，宽高上限 1280）或比例（如 16:9）",
+        "type": "string",
+        "default": "1024x1024",
+        "hint": "仅 mode 走 /image/generate 时生效"
+      },
+      "edit_aspect_ratio": {
+        "description": "编辑模式的画面比例（对应 Venice image/edit 的 aspect_ratio）",
+        "type": "string",
+        "default": "auto",
+        "hint": "seedream-v5-5-edit 支持：auto / 1:1 / 3:2 / 16:9 / 21:9 / 9:16 / 2:3 / 3:4 / 4:3；留空则不传"
+      },
+      "edit_resolution": {
+        "description": "编辑模式的输出分辨率（对应 Venice image/edit 的 resolution）",
+        "type": "string",
+        "default": "1K",
+        "hint": "seedream-v5-5-edit 支持 1K / 1.5K / 2K；模型无分辨率选项时请留空"
+      },
+      "prompt_prefix": {
+        "description": "统一的画风前缀（拼在模型给出的描述前，用于固定风格）",
+        "type": "string",
+        "default": "",
+        "hint": "示例：动漫风格，柔和光影，干净背景"
+      },
+      "reference_enabled": {
+        "description": "生图时携带人设参考图（编辑模式作为被编辑原图，文生图模式通过 style_references 传入）",
+        "type": "bool",
+        "default": true,
+        "hint": "编辑模型必须有参考图；文生图模型不支持 style_references 时请关掉本项"
+      },
+      "reference_image": {
+        "description": "指定用作参考的人设图（文件名或绝对路径；留空则用人设图清单的第一张）",
+        "type": "string",
+        "default": ""
+      },
+      "reference_strength": {
+        "description": "文生图时人设参考图的影响强度（0~1，对应 Venice style_references.strength）",
+        "type": "float",
+        "default": 0.8
+      },
+      "format": {
+        "description": "文生图返回图片格式",
+        "type": "string",
+        "default": "png",
+        "hint": "可选 png / jpeg / webp"
+      },
+      "negative_prompt": {
+        "description": "反向提示词（不希望出现的元素，仅文生图生效）",
+        "type": "string",
+        "default": ""
+      },
+      "style_preset": {
+        "description": "Venice 风格预设（仅文生图生效，留空则不指定）",
+        "type": "string",
+        "default": ""
+      },
+      "hide_watermark": {
+        "description": "隐藏 Venice 水印（仅文生图生效）",
+        "type": "bool",
+        "default": true
+      },
+      "safe_mode": {
+        "description": "Venice 安全模式（成人内容模糊）",
+        "type": "bool",
+        "default": true
+      },
+      "placeholder_tag": {
+        "description": "生图占位符标签（模型输出 [标签:画面描述] 时触发生成）",
+        "type": "string",
+        "default": "draw"
+      },
+      "timeout": {
+        "description": "单次生图请求超时（秒）",
+        "type": "float",
+        "default": 90
+      },
+      "max_per_turn": {
+        "description": "每条回复最多触发的生图数量",
+        "type": "int",
+        "default": 1
+      },
+      "keep_images": {
+        "description": "本地生图缓存保留数量（超出删除最旧的）",
+        "type": "int",
+        "default": 50
+      }
+    }
+  },
   "segmented_parser_config": {
     "description": "回复换行分段发送配置",
     "type": "object",

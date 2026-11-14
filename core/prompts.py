@@ -30,6 +30,26 @@ def format_meme_placeholder_injection(placeholder_tag: str = "meme") -> str:
     return render_prompt("meme_placeholder_injection", placeholder_tag=placeholder_tag)
 
 
+# ==================== 人设图与生图相关 ====================
+
+def format_persona_image_injection(placeholder_tag: str, image_list: str) -> str:
+    """格式化人设图占位符注入提示词（带可用图片清单）"""
+    return render_prompt(
+        "persona_image_injection",
+        placeholder_tag=placeholder_tag,
+        image_list=image_list,
+    )
+
+
+def format_image_gen_injection(placeholder_tag: str, max_per_turn: int = 1) -> str:
+    """格式化生图占位符注入提示词"""
+    return render_prompt(
+        "image_gen_injection",
+        placeholder_tag=placeholder_tag,
+        max_per_turn=max_per_turn,
+    )
+
+
 # ==================== 情绪与好感度相关提示词 ====================
 
 def _attitude_label(affinity: int) -> str:

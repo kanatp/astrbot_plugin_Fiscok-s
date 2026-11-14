@@ -315,6 +315,7 @@ async def plan_sequence(
     can_speak: Optional[bool] = None,
     affinity: Optional[int] = None,
     emotion: str = "",
+    hints: Optional[Dict[str, Any]] = None,
     timeout: float = 8.0,
 ) -> List[Dict[str, Any]]:
     """第二阶段：把发言草稿、用户输入与动作目录交给规划模型，返回校验过的序列。"""
@@ -335,6 +336,9 @@ async def plan_sequence(
         payload["affinity"] = int(affinity)
     if emotion:
         payload["emotion"] = str(emotion)[:100]
+    if hints:
+        # 主模型原本想发但被裁掉的表情包/人设图/生图意图，只用于编排动作
+        payload["clippedHints"] = hints
     if event:
         payload["event"] = event
     if environment:

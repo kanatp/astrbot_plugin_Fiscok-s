@@ -802,6 +802,7 @@ class SuzuBridge:
         warnings: List[str],
         capabilities: Dict[str, Any],
         user_text: str = "",
+        clipped: Optional[Dict[str, Any]] = None,
     ) -> web.Response:
         """统一构造聊天响应：动作由规划器按动作目录选择，不做任何情绪映射。"""
         reply = _clip(reply, 12000)
@@ -809,7 +810,7 @@ class SuzuBridge:
         affinity = self.plugin.data_manager.get_user_affinity(user_id, nickname)
         sequence: List[Dict[str, Any]] = []
         if uses_action_catalog(capabilities):
-            sequence = await self._plan_chat_actions(capabilities, reply, user_text)
+            sequence = await self._plan_chat_actions(capabilities, reply, user_text, clipped)
         actions = sequence_actions(sequence) if sequence else []
         if request_id:
             self._remember_actions(scope, request_id, actions, sequence)
@@ -830,7 +831,11 @@ class SuzuBridge:
         return _json(body)
 
     async def _plan_chat_actions(
-        self, capabilities: Dict[str, Any], reply: str, user_text: str
+        self,
+        capabilities: Dict[str, Any],
+        reply: str,
+        user_text: str,
+        clipped: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """聊天第二阶段：只决定动作与顺序，发言固定使用主 Agent 的完整回复。"""
         if capabilities.get("features", {}).get("behaviorSequence") is not True:
@@ -849,6 +854,7 @@ class SuzuBridge:
                 user_text=user_text,
                 planner_prompt=prompt,
                 proactive=False,
+                hints=clipped,
             )
         except ValueError as exc:
             logger.warning(f"[Fiscok's][suzu] 聊天动作规划不可用: {exc}")
@@ -1048,6 +1054,8 @@ class SuzuBridge:
     ) -> web.Response:
         """把桌面消息注入 AstrBot 事件队列，由主 Agent 管线完成后收回文本。"""
         platform_id, platform_name, self_id = self._pipeline_target()
+        # 清掉上一次异常中断可能残留的裁剪意图，避免污染本次动作编排
+        self.plugin.take_suzu_clipped(self._shared_umo())
 
         try:
             reply, image_sent = await chat_via_astrbot(
@@ -1076,6 +1084,8 @@ class SuzuBridge:
 
         self.last_chat_at = _iso_now()
         # 管线里的插件钩子已经记录演化对话、调度情绪分析并累计计数，这里不再重复记录。
+        # 被裁掉的表情包/人设图/生图意图仍交给动作规划器编排。
+        clipped = self.plugin.take_suzu_clipped(self._shared_umo())
         return await self._success_response(
             request_id=request_id,
             scope=scope,
@@ -1086,6 +1096,7 @@ class SuzuBridge:
             warnings=warnings,
             capabilities=capabilities,
             user_text=text,
+            clipped=clipped,
         )
 
     async def _chat_direct(
