@@ -22,6 +22,9 @@ from .topic_memory_apis import _cosine
 # 记忆抽取温度（偏低，保证分类/动作稳定）
 MEMORY_EXTRACTION_TEMPERATURE = 0.3
 
+# 记忆抽取超时（秒）；思考型模型关闭思考前明显偏慢，留足余量
+MEMORY_EXTRACTION_TIMEOUT = 40.0
+
 # 允许的记忆类别
 VALID_MEMORY_CATEGORIES = set(PERSONAL_MEMORY_CATEGORY_LABELS.keys())
 
@@ -52,7 +55,7 @@ async def extract_personal_memories(
     message: str,
     existing: List[Dict],
     max_ops: int = 3,
-    timeout: float = 20.0,
+    timeout: float = MEMORY_EXTRACTION_TIMEOUT,
 ) -> List[Dict]:
     """
     调用辅助 LLM 从一条私聊消息中抽取记忆操作。
@@ -65,11 +68,15 @@ async def extract_personal_memories(
     if not message or not message.strip():
         return []
 
+    provider_label = provider_id or "默认 Provider"
     try:
         provider = await get_aux_provider(context, provider_id)
         if provider is None:
             logger.warning("[Fiscok's][memory] 未找到可用的 LLM Provider，跳过个人记忆抽取")
             return []
+        provider_label = str(
+            (getattr(provider, "provider_config", {}) or {}).get("id") or provider_label
+        )
 
         prompt = format_personal_memory_extraction_prompt(
             nickname=nickname,
@@ -118,7 +125,9 @@ async def extract_personal_memories(
             })
         return operations
     except asyncio.TimeoutError:
-        logger.warning("[Fiscok's][memory] 个人记忆抽取超时，跳过")
+        logger.warning(
+            f"[Fiscok's][memory] 个人记忆抽取超时（{timeout:.0f}s，{provider_label}），跳过"
+        )
         return []
     except Exception as e:
         logger.warning(f"[Fiscok's][memory] 个人记忆抽取失败，不影响主流程: {e}")

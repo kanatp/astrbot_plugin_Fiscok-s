@@ -17,6 +17,8 @@ except Exception:  # pragma: no cover - 宿主结构变动时的兜底
 
 # 关闭思考时默认附加到请求体的参数（OpenAI 兼容家族）
 _DEFAULT_THINKING_OFF_EXTRA_BODY = {"reasoning_effort": "none"}
+# 这些网关用 enable_thinking 控制思考链，reasoning_effort 对它们无效
+_ENABLE_THINKING_OFF_HOSTS = ("siliconflow", "dashscope", "aliyuncs")
 
 _aux_provider_cache: dict = {}
 
@@ -54,6 +56,10 @@ def _apply_thinking_off(config: dict, family: str) -> None:
     else:
         merged = dict(config.get("custom_extra_body") or {})
         merged.update(_DEFAULT_THINKING_OFF_EXTRA_BODY)
+        api_base = str(config.get("api_base") or "").lower()
+        if any(host in api_base for host in _ENABLE_THINKING_OFF_HOSTS):
+            # SiliconFlow / DashScope 的 Qwen 只认 enable_thinking，不关会一直走思考链
+            merged["enable_thinking"] = False
         config["custom_extra_body"] = merged
         config["ollama_disable_thinking"] = True
 
