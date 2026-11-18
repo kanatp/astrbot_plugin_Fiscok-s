@@ -75,14 +75,26 @@ def format_emotion_analysis_prompt(current_emotion: str, nickname: str, message:
     )
 
 
-def format_emotion_state_injection(nickname: str, emotion: str, affinity: int) -> str:
-    """格式化情绪/好感度状态注入提示词"""
+def format_emotion_state_injection(
+    nickname: str,
+    emotion: str,
+    affinity: int,
+    bond_stage: str = "",
+    stage_guidance: str = "",
+) -> str:
+    """格式化情绪/好感度与四阶多维羁绊状态注入提示词"""
+    if not bond_stage or not stage_guidance:
+        from .services.emotion_service import EmotionService
+        bond_stage, stage_guidance = EmotionService.get_bond_stage(affinity)
+
     return render_prompt(
         "emotion_state_injection",
         nickname=nickname,
         emotion=emotion,
         affinity=affinity,
         attitude=_attitude_label(affinity),
+        bond_stage=bond_stage,
+        stage_guidance=stage_guidance,
     )
 
 

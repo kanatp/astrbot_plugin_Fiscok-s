@@ -94,6 +94,11 @@
         "description": "图片相对文本消息的延迟发送时间（秒），确保文字先到达",
         "type": "float",
         "default": 0.6
+      },
+      "allow_proactive_share": {
+        "description": "是否允许在主动聊天（私聊）时自主附带分享生活随拍照",
+        "type": "bool",
+        "default": true
       }
     }
   },
@@ -226,8 +231,13 @@
         "type": "bool",
         "default": false
       },
+      "dynamic_typing": {
+        "description": "启用拟真动态打字延迟（根据字数模拟真人打字节奏，短句快回、长句稍候，并触发“正在输入中...”）",
+        "type": "bool",
+        "default": true
+      },
       "send_interval": {
-        "description": "分段消息之间的发送间隔（秒）",
+        "description": "基础发送间隔（秒），作为动态延迟的底数基准",
         "type": "float",
         "default": 0.5
       }

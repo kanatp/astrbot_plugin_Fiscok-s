@@ -43,6 +43,15 @@ from .core.prompts import (
     PERSONAL_MEMORY_CATEGORY_LABELS,
 )
 from .core.prompt_library import PromptLibrary, get_prompt
+from .core.services import (
+    NicknameAnchorService,
+    MergeService,
+    EmotionService,
+    TypingService,
+    CommitmentTrackerService,
+    PresenceService,
+    ProactiveService,
+)
 from .core.net.twitter_fetch import fetch_twitter_data, check_availability
 from .core.net.instagram_fetch import create_loader, fetch_instagram_posts, fetch_instagram_stories, check_instagram_access
 
@@ -94,7 +103,7 @@ def _strip_internal_leaks(text: str) -> str:
     return text
 
 
-@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "2.9")
+@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "3.0")
 class Core(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -106,8 +115,14 @@ class Core(Star):
         # 提示词库：只由插件 WebUI 维护，不进入 AstrBot 插件配置
         self.prompt_library = PromptLibrary(self)
 
-        # 模型自身的全局情绪状态（运行时变量，文字描述，不持久化）
-        self.current_emotion = str(config.get('emotion_config', {}).get('emotion_init', '平静'))
+        # 初始化核心服务层（用户身份锚定、消息合并、情绪隔离衰减、拟真打字、在场协同、约定关怀、主动聊天持久化）
+        self.nickname_service = NicknameAnchorService(self.data_manager.root)
+        self.merge_service = MergeService()
+        self.emotion_service = EmotionService(self.data_manager, self.config)
+        self.typing_service = TypingService()
+        self.presence_service = PresenceService()
+        self.commitment_service = CommitmentTrackerService(self.data_manager.root)
+        self.proactive_service = ProactiveService(self.data_manager.root)
 
         # 后台任务：辅助调用（情绪分析/表情包学习）异步执行，避免阻塞主对话
         self._background_tasks: set = set()
@@ -122,12 +137,12 @@ class Core(Star):
         # 群聊话题跟踪会话（umo -> 会话状态），仅内存驻留
         self._topic_sessions: Dict[str, Dict] = {}
 
-        # 主动发起聊天：群聊最近消息缓冲与各群发言状态（仅内存驻留）
+        # 主动发起聊天：群聊最近消息缓冲与各群发言状态（由 ProactiveService 持久化托管）
         self._group_recent: Dict[str, List[str]] = {}
         self._group_last_activity: Dict[str, float] = {}
-        self._proactive_states: Dict[str, Dict] = {}
+        self._proactive_states: Dict[str, Dict] = self.proactive_service.all_states()
 
-        # 连续消息合并：同一会话中短期内连发的几条消息（仅内存驻留）
+        # 连续消息合并：同一会话中短期内连发的几条消息（由 MergeService 状态托管）
         self._merge_pending: Dict[str, Dict] = {}
 
         # @ 后的等待窗口：核心等待要等首次回复生成完才注册，这里提前登记补上空窗
@@ -197,6 +212,57 @@ class Core(Star):
 
         # 话题跟踪：后台巡检空闲超时，避免没有新消息时话题一直不结束
         self._spawn_background(self._topic_session_loop())
+
+        # 情绪半衰衰减巡检：平滑恢复长时间未互动的会话情绪
+        self._spawn_background(self._emotion_decay_loop())
+
+    async def _emotion_decay_loop(self):
+        """周期性巡检情绪惯性并平滑衰减"""
+        while self.running:
+            try:
+                await asyncio.sleep(900)
+                if hasattr(self, "emotion_service") and self.emotion_service:
+                    await self.emotion_service.decay_heartbeat(decay_minutes=45.0)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[Fiscok's][emotion] 情绪半衰期衰减巡检异常: {e}")
+                await asyncio.sleep(60)
+
+    @property
+    def current_emotion(self) -> str:
+        """获取默认隔离情绪（兼容未指定会话的旧代码或 Live2D 桌面端）"""
+        desktop_uid = str(getattr(getattr(self, "suzu_bridge", None), "memory_user_id", "") or "default_private")
+        if hasattr(self, "emotion_service") and self.emotion_service:
+            return self.emotion_service.get_current_emotion(desktop_uid)
+        return "平静"
+
+    @current_emotion.setter
+    def current_emotion(self, value: str):
+        desktop_uid = str(getattr(getattr(self, "suzu_bridge", None), "memory_user_id", "") or "default_private")
+        if hasattr(self, "emotion_service") and self.emotion_service:
+            self.emotion_service.set_emotion(desktop_uid, value)
+
+    def get_current_emotion(self, scope_key: str) -> str:
+        """获取指定会话或用户当前的情绪状态（带惯性自然衰减）"""
+        if hasattr(self, "emotion_service") and self.emotion_service:
+            return self.emotion_service.get_current_emotion(scope_key)
+        return "平静"
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=sys.maxsize - 5)
+    async def anchor_user_identity_on_message(self, event: AstrMessageEvent):
+        """
+        在消息到达时统一锚定用户 ID 与首次登记固定昵称，防止后续所有处理逻辑中昵称漂移；
+        同时记录 QQ 端的活跃在场状态与作息时段。
+        """
+        try:
+            sender_id = event.get_sender_id()
+            if sender_id and sender_id != event.get_self_id():
+                self.nickname_service.anchor_event(event)
+                self.presence_service.record_qq_active(sender_id)
+                self.proactive_service.record_user_activity_hour(sender_id)
+        except Exception as e:
+            logger.warning(f"[Fiscok's][identity] 锚定用户身份失败: {e}")
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def meme_learn_on_message(self, event: AstrMessageEvent):
@@ -530,58 +596,20 @@ class Core(Star):
             umo, event.get_sender_name() or '群友', message, proactive_config
         )
 
-    @filter.event_message_type(filter.EventMessageType.ALL)
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=sys.maxsize - 10)
     async def merge_fragments_on_message(self, event: AstrMessageEvent):
         """
         连续消息合并：对方把一句话分几条发来时，先等一小会儿，
-        若期间还有新消息则本条不单独回复，由最后一条带上全部片段一起进入 LLM
+        若期间还有新消息则本条不单独回复，由最后一条带上全部片段一起进入 LLM。
+        委托给 MergeService 处理，修复优先级过低、并发串台与 Plain 组件链未同步的问题。
         """
         merge_config = self.config.get('message_merge_config', {})
-        if event.get_extra('_suzu_pipeline'):
-            # 桌面端与绑定 QQ 共用 umo，跳过合并，避免和 QQ 私聊片段串在一起
-            return
-        if not merge_config.get('available', False):
-            return
-        if merge_config.get('private_only', True) and event.get_group_id():
-            return
-
-        sender_id = event.get_sender_id()
-        if not sender_id or sender_id == event.get_self_id():
-            return
-
-        message = (event.message_str or '').strip()
-        if not message or message.startswith(('/', '／')):
-            return
-
-        umo = event.unified_msg_origin
-        message_id = getattr(event.message_obj, 'message_id', None) or id(event)
-        pending = self._merge_pending.get(umo)
-        if pending is None or pending['sender_id'] != sender_id:
-            pending = {'sender_id': sender_id, 'fragments': [], 'last_id': None}
-            self._merge_pending[umo] = pending
-
-        pending['fragments'].append(message)
-        max_fragments = max(1, int(merge_config.get('max_fragments', 4) or 4))
-        if len(pending['fragments']) > max_fragments:
-            del pending['fragments'][:len(pending['fragments']) - max_fragments]
-        pending['last_id'] = message_id
-
-        delay = max(0.0, float(merge_config.get('debounce_seconds', 1.2) or 0))
-        if delay > 0:
-            await asyncio.sleep(delay)
-
-        # 等待期间又来了更新的消息：这一条并入后面的消息，不单独回复
-        if pending['last_id'] != message_id:
-            event.stop_event()
-            return
-
-        fragments = pending['fragments'][:]
-        pending['fragments'] = []
-        if len(fragments) <= 1:
-            return
-
-        event.message_str = '\n'.join(fragments)
-        logger.info(f"[Fiscok's][merge] 已合并 {len(fragments)} 条连续消息（{umo}）")
+        try:
+            should_continue = await self.merge_service.handle_message(event, merge_config)
+            if not should_continue:
+                return
+        except Exception as e:
+            logger.warning(f"[Fiscok's][merge] 连续消息合并处理异常: {e}")
 
     @filter.on_llm_request()
     async def on_llm_request_topic_hook(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -761,7 +789,8 @@ class Core(Star):
     async def on_llm_request_emotion_hook(self, event: AstrMessageEvent, req: ProviderRequest):
         """
         在 LLM 请求阶段注入当前已知的情绪/好感度状态（不阻塞主请求）；
-        情绪/好感度分析改为后台异步执行，更新结果供下一轮请求使用
+        情绪/好感度分析改为后台异步执行，更新结果供下一轮请求使用。
+        使用固定锚定昵称与会话隔离情绪。
         """
         emotion_config = self.config.get('emotion_config', {})
         if not emotion_config.get('available', False):
@@ -772,18 +801,23 @@ class Core(Star):
             return
 
         try:
-            nickname = event.get_sender_name()
-            # 立即用当前已知状态注入，避免等待情绪分析
+            raw_nickname = event.get_sender_name() or "对方"
+            nickname = self.nickname_service.get_anchored_nickname(sender_id, raw_nickname)
+            scope_key = self.emotion_service.get_scope_key(event)
+            current_emo = self.emotion_service.get_current_emotion(scope_key)
             affinity = self.data_manager.get_user_affinity(sender_id, nickname)
+            bond_stage, stage_guidance = self.emotion_service.get_bond_stage(affinity)
             injection = format_emotion_state_injection(
                 nickname,
-                self.current_emotion,
+                current_emo,
                 affinity,
+                bond_stage=bond_stage,
+                stage_guidance=stage_guidance,
             )
             req.system_prompt = f"{req.system_prompt or ''}\n{injection}"
 
-            # 后台异步分析，更新全局情绪与该用户好感度（供后续请求使用）
-            self._schedule_emotion_analysis(sender_id, nickname, event.message_str, emotion_config)
+            # 后台异步分析，更新隔离情绪与该用户好感度（供后续请求使用）
+            self._schedule_emotion_analysis(sender_id, nickname, event.message_str, emotion_config, scope_key=scope_key)
         except Exception as e:
             logger.warning(f"[Fiscok's][emotion] 注入情绪状态失败，不影响主请求: {e}")
 
@@ -801,7 +835,8 @@ class Core(Star):
             if injection:
                 req.system_prompt = f"{req.system_prompt or ''}\n{injection}"
 
-            nickname = event.get_sender_name() or '对方'
+            sender_id = event.get_sender_id() or ""
+            nickname = self.nickname_service.get_anchored_nickname(sender_id, event.get_sender_name() or '对方')
             self._append_persona_line(
                 event.unified_msg_origin, nickname, event.message_str, persona_config
             )
@@ -864,12 +899,23 @@ class Core(Star):
                 items.append({'category': memory.get('category', ''), 'text': text})
                 total_chars += len(text)
 
+            anchored_nickname = self.nickname_service.get_anchored_nickname(sender_id, event.get_sender_name() or '对方')
             injection = format_personal_memory_injection(
-                event.get_sender_name() or '对方', items
+                anchored_nickname, items
             )
             if injection:
                 req.system_prompt = f"{req.system_prompt or ''}\n{injection}"
                 logger.info(f"[Fiscok's][memory] 已注入 {len(items)} 条个人记忆")
+
+            # 注入待办约定与情感关怀备忘（到期回响）
+            due_items = self.commitment_service.get_due_commitments(sender_id)
+            if due_items:
+                care_injection = self.commitment_service.format_care_injection(due_items, anchored_nickname)
+                if care_injection:
+                    req.system_prompt = f"{req.system_prompt or ''}\n{care_injection}"
+                    for item in due_items:
+                        self.commitment_service.mark_fulfilled(sender_id, item['id'])
+                    logger.info(f"[Fiscok's][care] 已注入 {len(due_items)} 条关怀备忘")
         except Exception as e:
             logger.warning(f"[Fiscok's][memory] 检索/注入个人记忆失败，不影响主请求: {e}")
 
@@ -960,48 +1006,22 @@ class Core(Star):
         finally:
             self._persona_evolve_pending = False
 
-    def _schedule_emotion_analysis(self, sender_id: str, nickname: str, message: str, emotion_config: Dict):
+    def _schedule_emotion_analysis(self, sender_id: str, nickname: str, message: str, emotion_config: Dict, scope_key: str = ""):
         """
-        将情绪/好感度分析放入后台异步执行（同一用户串行，避免重复堆积）
+        将情绪/好感度分析放入后台异步执行（委托给 EmotionService，按用户级别细粒度锁，会话情绪隔离）
         """
-        if sender_id in self._emotion_pending:
-            return
-        self._emotion_pending.add(sender_id)
-
-        async def _run():
-            try:
-                async with self._emotion_lock:
-                    result = await analyze_emotion_state(
-                        self.context,
-                        provider_id=emotion_config.get('llm_provider_id', ''),
-                        nickname=nickname,
-                        message=message,
-                        current_emotion=self.current_emotion,
-                        temperature=emotion_config.get('temperature', 1.2),
-                        delta_max=emotion_config.get('delta_max', 5),
-                    )
-                    if not result:
-                        return
-
-                    # 更新模型全局情绪（文字描述）
-                    new_emotion = result.get('emotion', '')
-                    if new_emotion:
-                        self.current_emotion = new_emotion
-
-                    # 更新该用户好感度（数值，JSON 持久化）
-                    self.data_manager.update_user_affinity(
-                        sender_id,
-                        affinity_delta=result.get('affinity_delta', 0),
-                        nickname=nickname,
-                        min_=emotion_config.get('affinity_min', 0),
-                        max_=emotion_config.get('affinity_max', 100),
-                    )
-            except Exception as e:
-                logger.warning(f"[Fiscok's][emotion] 后台情绪/好感度分析失败，不影响主请求: {e}")
-            finally:
-                self._emotion_pending.discard(sender_id)
-
-        self._spawn_background(_run())
+        if not scope_key:
+            scope_key = sender_id
+        self._spawn_background(
+            self.emotion_service.schedule_analysis(
+                self.context,
+                scope_key=scope_key,
+                sender_id=sender_id,
+                nickname=nickname,
+                message=message,
+                emotion_config=emotion_config,
+            )
+        )
 
     def _schedule_topic_learning(self, sender_id: str, nickname: str, message: str, topic_config: Dict, scope: str = ''):
         """
@@ -1137,6 +1157,14 @@ class Core(Star):
                             vector,
                             operation.get('importance', 3),
                         )
+                        # 如果是具有时效性的计划、约定或重要生活事件，同步登记至关怀追踪器
+                        cat = str(operation.get('category', 'profile')).lower()
+                        if cat in ('plan', 'event') or any(k in text for k in ('明天', '下周', '考', '病', '去', '约', '手术', '答辩', '面试', '感冒')):
+                            self.commitment_service.add_commitment(
+                                sender_id,
+                                topic=text,
+                                concern_type=cat,
+                            )
             except Exception as e:
                 logger.warning(f"[Fiscok's][memory] 后台个人记忆抽取失败，不影响主请求: {e}")
             finally:
@@ -1471,9 +1499,10 @@ class Core(Star):
             return not (start <= hour < end)
         return not (hour >= start or hour < end)
 
-    @staticmethod
-    def _describe_now() -> str:
-        """当前时间描述（用于提示词，让发言符合作息）"""
+    def _describe_now(self, user_id: str = "") -> str:
+        """当前时间描述、机器人虚拟生活日常与用户作息习惯提示（用于提示词，让发言符合作息）"""
+        if hasattr(self, "proactive_service") and self.proactive_service:
+            return self.proactive_service.get_circadian_hint(user_id=user_id)
         weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
         lt = time.localtime()
         hour = lt.tm_hour
@@ -1525,7 +1554,12 @@ class Core(Star):
                 if is_private:
                     if not cfg.get('private_available', False):
                         continue
-                    if not self._is_user_allowed(state.get('sender_id', ''), cfg):
+                    sender_id = state.get('sender_id', '')
+                    if not self._is_user_allowed(sender_id, cfg):
+                        continue
+                    # 检查是否处于 PC 在场状态，若在场则抑制手机 QQ 私聊主动打扰
+                    if hasattr(self, "presence_service") and self.presence_service.should_suppress_qq_proactive(sender_id):
+                        logger.info(f"[Fiscok's][proactive] 用户 {sender_id} 处于 PC 在场状态，抑制 QQ 私聊主动打扰")
                         continue
                     min_silence = float(cfg.get('private_min_silence_minutes', 120) or 0) * 60
                     daily_limit = int(cfg.get('private_daily_limit', 3) or 0)
@@ -1569,15 +1603,10 @@ class Core(Star):
                     continue
 
                 spoke_at = time.time()
-                state['last_spoke_at'] = spoke_at
-                state['daily_count'] = state.get('daily_count', 0) + 1
-                state['next_try'] = spoke_at + self._random_silence(cfg, is_private)
-
-                last_messages = state.setdefault('last_messages', [])
-                last_messages.append(text)
-                max_last = int(cfg.get('last_messages', 3) or 0)
-                if max_last > 0 and len(last_messages) > max_last:
-                    del last_messages[:len(last_messages) - max_last]
+                next_try = spoke_at + self._random_silence(cfg, is_private)
+                self.proactive_service.record_spoke(
+                    umo, text, next_try, max_last_messages=int(cfg.get('last_messages', 3) or 0)
+                )
             except Exception as e:
                 logger.warning(f"[Fiscok's][proactive] 处理群聊 {umo} 主动发言失败: {e}")
 
@@ -1619,12 +1648,24 @@ class Core(Star):
             persona_prompt = ''
 
         # 带上当前情绪状态，让主动发言的语气和近期状态一致
-        if self.current_emotion:
-            persona_prompt = f"{persona_prompt}\n\n你现在的心情：{self.current_emotion}".strip()
+        scope_key = umo if not is_private else str(state.get('sender_id') or umo)
+        current_emo = self.emotion_service.get_current_emotion(scope_key)
+        if current_emo:
+            persona_prompt = f"{persona_prompt}\n\n你现在的心情：{current_emo}".strip()
 
         # 带上演化出的自我设定（开启人设演化时生效）
         if self._persona_overlay and self.config.get('persona_evolution_config', {}).get('available', False):
             persona_prompt = f"{persona_prompt}\n\n你的自我设定：{self._persona_overlay}".strip()
+
+        # 私聊时检查是否有已到期且待关怀的约定备忘（被惦记感）
+        due_items = []
+        if is_private and state.get('sender_id'):
+            due_items = self.commitment_service.get_due_commitments(state['sender_id'])
+            if due_items:
+                anchored_nick = self.nickname_service.get_anchored_nickname(state['sender_id'], state.get('nickname') or '')
+                care_injection = self.commitment_service.format_care_injection(due_items, anchored_nick)
+                if care_injection:
+                    persona_prompt = f"{persona_prompt}\n\n{care_injection}".strip()
 
         # 私聊时带上对该用户的好感度，让亲近程度和关系一致
         if is_private and state.get('sender_id'):
@@ -1655,11 +1696,26 @@ class Core(Star):
         if knowledge:
             persona_prompt = f"{persona_prompt}\n\n{knowledge}".strip()
 
+        # 主动生活照片/立绘随拍分享机制：在私聊中允许主动附带生活随拍
+        image_config = self.config.get('persona_image_config', {})
+        if is_private and image_config.get('available', False) and image_config.get('allow_proactive_share', True):
+            try:
+                images = list_persona_images(Path(self.plugin_data_path), image_config)
+                if images:
+                    placeholder_tag = str(image_config.get('placeholder_tag') or 'pic').strip() or 'pic'
+                    persona_prompt = (
+                        f"{persona_prompt}\n\n"
+                        f"你如果在聊天中想向对方主动分享自己此刻的生活随拍或自拍照，可在句末附带生活照占位符 [{placeholder_tag}:图片ID]"
+                        f"（可用生活照ID：{format_image_list(images, 8)}）。仅在分享生活或氛围自然时附带，不要强行发图。"
+                    ).strip()
+            except Exception:
+                pass
+
         text = await generate_proactive_message(
             self.context,
             provider_id=cfg.get('llm_provider_id', ''),
             persona_prompt=persona_prompt,
-            time_desc=self._describe_now(),
+            time_desc=self._describe_now(user_id=str(state.get('sender_id') or '')),
             recent=recent,
             last_messages=list(state.get('last_messages', [])),
             nickname=state.get('nickname', ''),
@@ -1667,6 +1723,10 @@ class Core(Star):
         )
         if not text:
             return ''
+
+        if due_items and is_private and state.get('sender_id'):
+            for item in due_items:
+                self.commitment_service.mark_fulfilled(state['sender_id'], item['id'])
 
         max_chars = int(cfg.get('max_chars', 120) or 0)
         if max_chars > 0 and len(text) > max_chars:
@@ -1680,6 +1740,21 @@ class Core(Star):
         text = _strip_internal_leaks(text)
         if not text:
             return False
+
+        # 解析并分离主动分享的人设生活随拍照
+        images_to_send = []
+        image_config = self.config.get('persona_image_config', {})
+        if is_private and image_config.get('available', False):
+            tag = str(image_config.get('placeholder_tag') or 'pic').strip() or 'pic'
+            pattern = rf'\[{re.escape(tag)}:(.+?)\]'
+            keys = re.findall(pattern, text)
+            if keys:
+                images = list_persona_images(Path(self.plugin_data_path), image_config)
+                for key in keys:
+                    img = resolve_persona_image(images, key)
+                    if img:
+                        images_to_send.append(img['path'])
+                text = re.sub(pattern, '', text).strip()
 
         seg_cfg = self.config.get('segmented_parser_config', {})
         if seg_cfg.get('available', False):
@@ -1705,6 +1780,10 @@ class Core(Star):
         self._append_group_line(umo, '我', text, cfg)
         # 写回同一份 AstrBot 会话历史，后续正常对话和下一次主动发言都能看到
         await self._append_assistant_history(umo, text)
+
+        # 发送附带的主动生活随拍
+        for img_path in images_to_send:
+            await self._send_image_separately(umo, img_path, label='生活随拍', delay=0.6)
 
         # 若开启了话题跟踪，把这次主动发言也作为一个话题起点（话题跟踪仅针对群聊）
         track_config = self.config.get('topic_tracking_config', {})
@@ -2288,12 +2367,21 @@ class Core(Star):
             if other_comps:
                 await self.context.send_message(umo, MessageChain(chain=other_comps))
 
-            # 再逐行发送文本
-            send_interval = segmented_config.get('send_interval', 0.5)
-            for line in plain_segments:
+            # 再逐行发送文本（应用拟真动态打字延迟与正在输入中状态）
+            base_interval = float(segmented_config.get('send_interval', 0.5) or 0.5)
+            dynamic_typing = segmented_config.get('dynamic_typing', True)
+
+            for i, line in enumerate(plain_segments):
+                if dynamic_typing and hasattr(self, "typing_service"):
+                    delay = self.typing_service.calculate_delay(line, base=base_interval)
+                    await self.typing_service.try_set_input_status(event)
+                else:
+                    delay = base_interval
+
+                if i > 0 and delay > 0:
+                    await asyncio.sleep(delay)
+
                 await self.context.send_message(umo, MessageChain(chain=[Plain(line)]))
-                if send_interval > 0:
-                    await asyncio.sleep(send_interval)
 
             # 原消息链不再重复发送
             event.clear_result()
@@ -2391,6 +2479,25 @@ class Core(Star):
             await self._send_image_separately(umo, str(path), '生成图', 0.8)
         except Exception as e:
             logger.error(f"[Fiscok's][image] 生成并发送图片失败: {e}", exc_info=True)
+
+    @filter.command('bot_life_status', alias={'生活状态', '日常'})
+    async def bot_life_status(self, event: AstrMessageEvent):
+        """
+        查看机器人此刻的虚拟日常状态、时空氛围与心情
+        """
+        sender_id = str(event.get_sender_id() or "")
+        circadian = self.proactive_service.get_circadian_hint(sender_id)
+        scope_key = sender_id if not event.get_group_id() else event.unified_msg_origin
+        current_emo = self.get_current_emotion(scope_key)
+        activity = self.proactive_service.get_bot_current_activity()
+
+        msg = (
+            f"🌿 机器人的虚拟日常：\n"
+            f"{circadian}\n"
+            f"此刻心情：{current_emo}\n"
+            f"当前正在做：{activity}"
+        )
+        yield event.plain_result(msg)
 
     # 临时测试用指令
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -2778,6 +2885,113 @@ class Core(Star):
         self._persona_recent.clear()
         self._persona_reply_count = 0
         yield event.plain_result("已重置自我设定，回到只使用原生人设的状态")
+
+    # --- 用户固定昵称锚定管理指令组 ---
+    @filter.command_group('user_nickname_manager', alias={'用户昵称'})
+    def user_nickname_manager(self):
+        pass
+
+    @user_nickname_manager.command('show', alias={'查看'})
+    async def user_nickname_show(self, event: AstrMessageEvent, target_id: str = ""):
+        target_id = target_id.strip() or str(event.get_sender_id())
+        identities = self.nickname_service.get_all_identities()
+        record = identities.get(target_id)
+        if not record:
+            yield event.plain_result(f"未找到用户 {target_id} 的固定昵称记录")
+            return
+        first_name = record.get("first_nickname", "")
+        last_name = record.get("last_seen_nickname", "")
+        reg_at = record.get("registered_at", "")
+        affinity = self.data_manager.get_user_affinity(target_id, first_name)
+        bond_stage, _ = self.emotion_service.get_bond_stage(affinity)
+        habit_hint = self.proactive_service.get_user_habit_hint(target_id) or "（常规作息）"
+
+        yield event.plain_result(
+            f"用户 {target_id} 身份与羁绊记录：\n"
+            f"固定锚定昵称：{first_name}\n"
+            f"最近上报昵称：{last_name}\n"
+            f"好感度与羁绊：{affinity}/100 {bond_stage}\n"
+            f"作息习惯画像：{habit_hint}\n"
+            f"首次登记时间：{reg_at}"
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @user_nickname_manager.command('set', alias={'修改'})
+    async def user_nickname_set(self, event: AstrMessageEvent, target_id: str, new_nickname: str):
+        target_id = target_id.strip()
+        new_nickname = new_nickname.strip()
+        if not target_id or not new_nickname:
+            yield event.plain_result("格式：/用户昵称 修改 <QQ号> <新固定昵称>")
+            return
+        success = self.nickname_service.set_anchored_nickname(target_id, new_nickname)
+        if success:
+            yield event.plain_result(f"已成功将用户 {target_id} 的固定昵称修改为：{new_nickname}")
+        else:
+            yield event.plain_result("修改失败，请检查参数")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @user_nickname_manager.command('reset', alias={'重置'})
+    async def user_nickname_reset(self, event: AstrMessageEvent, target_id: str):
+        target_id = target_id.strip()
+        if not target_id:
+            yield event.plain_result("格式：/用户昵称 重置 <QQ号>")
+            return
+        success = self.nickname_service.reset_anchored_nickname(target_id)
+        if success:
+            yield event.plain_result(f"已重置用户 {target_id} 的固定昵称记录，下次发言将重新登记")
+        else:
+            yield event.plain_result(f"未找到用户 {target_id} 的绑定记录")
+
+    # --- 待办约定与情感关怀管理指令组 ---
+    @filter.command_group('commitment_manager', alias={'关怀'})
+    def commitment_manager(self):
+        pass
+
+    @commitment_manager.command('show', alias={'查看'})
+    async def commitment_show(self, event: AstrMessageEvent, target_id: str = ""):
+        target_id = target_id.strip() or str(event.get_sender_id())
+        items = self.commitment_service.get_all_commitments(target_id)
+        if not items:
+            yield event.plain_result(f"用户 {target_id} 当前没有任何关怀与约定备忘")
+            return
+        lines = [f"用户 {target_id} 的关怀备忘记录（共 {len(items)} 条）："]
+        for item in items:
+            t_str = datetime.fromtimestamp(item.get("target_time", 0)).strftime("%m-%d %H:%M")
+            status_desc = "待关怀" if item.get("status") == "pending" else ("已回响" if item.get("status") == "fulfilled" else "已过期")
+            lines.append(f"[{item.get('id')}] [{status_desc}] ({t_str}) {item.get('topic')}")
+        yield event.plain_result("\n".join(lines))
+
+    @commitment_manager.command('add', alias={'添加'})
+    async def commitment_add(self, event: AstrMessageEvent, topic: str):
+        topic = topic.strip()
+        if not topic:
+            yield event.plain_result("格式：/关怀 添加 <事项内容，例如：明天下午有答辩/今天重感冒>")
+            return
+        sender_id = str(event.get_sender_id())
+        item_id = self.commitment_service.add_commitment(sender_id, topic)
+        if item_id:
+            yield event.plain_result(f"已记下该关怀事项 [{item_id}]，将在适宜时机主动问候！")
+        else:
+            yield event.plain_result("添加失败，请检查参数")
+
+    @commitment_manager.command('delete', alias={'删除'})
+    async def commitment_delete(self, event: AstrMessageEvent, item_id: str):
+        item_id = item_id.strip()
+        if not item_id:
+            yield event.plain_result("格式：/关怀 删除 <事项ID>")
+            return
+        sender_id = str(event.get_sender_id())
+        success = self.commitment_service.delete_commitment(sender_id, item_id)
+        if success:
+            yield event.plain_result(f"已成功删除关怀事项 [{item_id}]")
+        else:
+            yield event.plain_result(f"未找到事项 [{item_id}]")
+
+    @commitment_manager.command('clear', alias={'清空'})
+    async def commitment_clear(self, event: AstrMessageEvent):
+        sender_id = str(event.get_sender_id())
+        self.commitment_service.clear_commitments(sender_id)
+        yield event.plain_result("已清空你的全部关怀与约定记录")
 
     # --- Instagram 缓存更新 ---
     async def instagram_cache_update(self):

@@ -986,6 +986,10 @@ class SuzuBridge:
 
         user_id = self._user_id(payload.get("user_id"))
         nickname = self._nickname(payload.get("nickname"))
+        if hasattr(self.plugin, "presence_service") and self.plugin.presence_service:
+            self.plugin.presence_service.record_desktop_active(user_id)
+        if hasattr(self.plugin, "nickname_service") and self.plugin.nickname_service:
+            nickname = self.plugin.nickname_service.get_anchored_nickname(user_id, nickname)
         capabilities = (
             payload.get("capabilities")
             if isinstance(payload.get("capabilities"), dict)
@@ -1334,6 +1338,9 @@ class SuzuBridge:
         if not payload:
             return _error("请求体必须为 JSON 对象", 400, "INVALID_INPUT")
         identity = self.memory_user_id
+        if hasattr(self.plugin, "presence_service") and self.plugin.presence_service:
+            is_busy = bool((payload.get("state") or {}).get("busy", False))
+            self.plugin.presence_service.record_desktop_active(identity, is_busy=is_busy)
         provider = self._proactive_provider()
         planner_provider, _ = self._companion_planner()
         nickname = self.default_nickname
@@ -1371,7 +1378,7 @@ class SuzuBridge:
                     "behavior_planner": self.prompts.get("behavior_planner"),
                 },
                 affinity=self.plugin.data_manager.get_user_affinity(identity, nickname),
-                emotion=str(self.plugin.current_emotion or ""),
+                emotion=str(self.plugin.get_current_emotion(identity) if hasattr(self.plugin, "get_current_emotion") else (self.plugin.current_emotion or "")),
                 nickname=nickname,
             )
         except ValueError as exc:

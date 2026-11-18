@@ -227,6 +227,13 @@ class SuzuWebUI:
         app.router.add_post("/ui/api/live2d/restart", self._live2d_restart)
         app.router.add_get("/ui/api/prompts", self._prompts_get)
         app.router.add_post("/ui/api/prompts", self._prompts_set)
+        app.router.add_get("/ui/api/commitments", self._commitments_get)
+        app.router.add_post("/ui/api/commitments/add", self._commitments_add)
+        app.router.add_post("/ui/api/commitments/fulfill", self._commitments_fulfill)
+        app.router.add_post("/ui/api/commitments/delete", self._commitments_delete)
+        app.router.add_get("/ui/api/identities", self._identities_get)
+        app.router.add_post("/ui/api/identities/set", self._identities_set)
+        app.router.add_post("/ui/api/identities/reset", self._identities_reset)
 
     async def _page(self, request: web.Request) -> web.Response:
         return web.Response(
@@ -396,6 +403,18 @@ class SuzuWebUI:
                 "boundQQ": bridge.memory_qq,
                 "nickname": bridge.default_nickname,
                 "affinity": affinity,
+            },
+            "presence": {
+                "active": plugin.presence_service.is_desktop_active(user_id) if hasattr(plugin, "presence_service") and plugin.presence_service else False,
+                "suppressQQ": plugin.presence_service.should_suppress_qq_proactive(user_id) if hasattr(plugin, "presence_service") and plugin.presence_service else False,
+            },
+            "life": {
+                "activity": plugin.proactive_service.get_bot_current_activity() if hasattr(plugin, "proactive_service") and plugin.proactive_service else "",
+                "circadian": plugin.proactive_service.get_circadian_hint(user_id) if hasattr(plugin, "proactive_service") and plugin.proactive_service else "",
+            },
+            "bond": {
+                "stage": plugin.emotion_service.get_bond_stage(affinity)[0] if hasattr(plugin, "emotion_service") and plugin.emotion_service else "",
+                "guidance": plugin.emotion_service.get_bond_stage(affinity)[1] if hasattr(plugin, "emotion_service") and plugin.emotion_service else "",
             },
             "persona": {
                 "baselineName": baseline.get("name") or "",
@@ -1057,3 +1076,81 @@ class SuzuWebUI:
                 f"[Fiscok's][suzu] 端口 {result.get('port')} 启动失败，"
                 "请检查插件配置里的监听地址/端口是否被占用"
             )
+
+    # ---------------- 约定关怀与身份绑定 ----------------
+
+    async def _commitments_get(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        user_id = str(request.query.get("user_id") or "").strip()
+        if hasattr(self.plugin, "commitment_service") and self.plugin.commitment_service:
+            items = self.plugin.commitment_service.get_all_commitments(user_id)
+        else:
+            items = []
+        return _json({"ok": True, "items": items})
+
+    async def _commitments_add(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        data = await _read_json(request)
+        user_id = str(data.get("user_id") or self.bridge.memory_user_id).strip()
+        topic = str(data.get("topic") or "").strip()
+        if not topic:
+            return _json({"ok": False, "error": "事项内容不能为空"}, 400)
+        item_id = self.plugin.commitment_service.add_commitment(user_id, topic)
+        return _json({"ok": True, "id": item_id})
+
+    async def _commitments_fulfill(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        data = await _read_json(request)
+        user_id = str(data.get("user_id") or self.bridge.memory_user_id).strip()
+        item_id = str(data.get("id") or "").strip()
+        success = self.plugin.commitment_service.mark_fulfilled(user_id, item_id)
+        return _json({"ok": success})
+
+    async def _commitments_delete(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        data = await _read_json(request)
+        user_id = str(data.get("user_id") or self.bridge.memory_user_id).strip()
+        item_id = str(data.get("id") or "").strip()
+        success = self.plugin.commitment_service.delete_commitment(user_id, item_id)
+        return _json({"ok": success})
+
+    async def _identities_get(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        if hasattr(self.plugin, "nickname_service") and self.plugin.nickname_service:
+            data = self.plugin.nickname_service.get_all_identities()
+        else:
+            data = {}
+        return _json({"ok": True, "identities": data})
+
+    async def _identities_set(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        data = await _read_json(request)
+        user_id = str(data.get("user_id") or "").strip()
+        nickname = str(data.get("nickname") or "").strip()
+        if not user_id or not nickname:
+            return _json({"ok": False, "error": "用户ID和固定昵称不能为空"}, 400)
+        success = self.plugin.nickname_service.set_anchored_nickname(user_id, nickname)
+        return _json({"ok": success})
+
+    async def _identities_reset(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        data = await _read_json(request)
+        user_id = str(data.get("user_id") or "").strip()
+        if not user_id:
+            return _json({"ok": False, "error": "用户ID不能为空"}, 400)
+        success = self.plugin.nickname_service.reset_anchored_nickname(user_id)
+        return _json({"ok": success})

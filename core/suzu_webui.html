@@ -759,6 +759,17 @@
           <div class="msg" id="evolve-msg"></div>
         </section>
 
+        <section class="card col-6" data-tab="overview">
+          <div class="card-head">
+            <div>
+              <h2>多端在场与虚拟生活轴</h2>
+              <p class="hint">PC 在场感知、QQ 主动免打扰与今日虚拟日常</p>
+            </div>
+            <span id="badge-presence" class="badge mint">实时协同</span>
+          </div>
+          <div class="kv" id="presence-kv"></div>
+        </section>
+
         <section class="card col-12" data-tab="memes">
           <div class="card-head">
             <div>
@@ -807,6 +818,38 @@
           <div class="toolbar"><select id="personal-user"></select></div>
           <div class="memory-list" id="personal-list"></div>
           <div class="msg" id="personal-msg"></div>
+        </section>
+
+        <section class="card col-6" data-tab="memory">
+          <div class="card-head">
+            <div>
+              <h2>待办约定与情感关怀</h2>
+              <p class="hint">记录时效性事件/情绪，到期自动在聊天与主动搭话中温和回响</p>
+            </div>
+            <div class="head-actions">
+              <span id="badge-commitment" class="badge lav">0 条</span>
+            </div>
+          </div>
+          <div class="toolbar" style="display:flex;gap:8px;">
+            <input id="commitment-topic" placeholder="输入关怀事项（如：明天下午有答辩/今天重感冒）" style="flex:1" />
+            <button id="commitment-add" class="mini-btn primary" type="button">添加</button>
+          </div>
+          <div class="memory-list" id="commitment-list"></div>
+          <div class="msg" id="commitment-msg"></div>
+        </section>
+
+        <section class="card col-6" data-tab="memory">
+          <div class="card-head">
+            <div>
+              <h2>用户身份与固定昵称绑定表</h2>
+              <p class="hint">首次记录的不可变锚定昵称，防止群名片频繁修改导致认知漂移</p>
+            </div>
+            <div class="head-actions">
+              <span id="badge-identity" class="badge mint">0 用户</span>
+            </div>
+          </div>
+          <div class="memory-list" id="identity-list"></div>
+          <div class="msg" id="identity-msg"></div>
         </section>
 
         <section class="card col-12" data-tab="emotion">
@@ -1048,6 +1091,21 @@
           ['更新时间', fmtTime(persona.evolvedAt)]
         ])
         $('persona-evolved').textContent = persona.evolved || '还没有演化自我设定。'
+
+        const presence = data.presence || {}
+        const life = data.life || {}
+        const bond = data.bond || {}
+
+        if ($('presence-kv')) {
+          $('presence-kv').innerHTML = kv([
+            ['桌面端状态', presence.active ? '<span style="color:var(--mint,#3dd68c);font-weight:bold">PC在场（活跃中）</span>' : '离线 / 暂无活动'],
+            ['QQ主动避让', presence.suppressQQ ? '<span style="color:var(--amber,#f5a623);font-weight:bold">已开启免打扰（用户在PC前）</span>' : '正常监听'],
+            ['羁绊阶段', esc(bond.stage || '初识阶段')],
+            ['今日生活状态', esc(life.activity || '休息中')],
+            ['生活氛围节点', esc(life.circadian || '-')]
+          ])
+        }
+
         $('badge-memory').textContent = (memory.count || 0) + ' 条'
         $('memory-hint').textContent = user.boundQQ
           ? '已绑定 QQ ' + user.boundQQ + '，与私聊共用个人记忆与好感度'
@@ -1079,6 +1137,8 @@
           loadMemes().catch((error) => setMsg('meme-msg', error.message, 'error')),
           loadTopics().catch((error) => setMsg('topic-msg', error.message, 'error')),
           loadPersonal().catch((error) => setMsg('personal-msg', error.message, 'error')),
+          loadCommitments().catch((error) => setMsg('commitment-msg', error.message, 'error')),
+          loadIdentities().catch((error) => setMsg('identity-msg', error.message, 'error')),
           loadEmotion().catch((error) => setMsg('emotion-hint', error.message, 'error'))
         ])
       }
@@ -1548,6 +1608,159 @@
         }
       }
 
+      let commitmentItems = []
+      let identityEntries = {}
+
+      async function loadCommitments() {
+        const res = await api('/ui/api/commitments')
+        commitmentItems = res.items || []
+        if ($('badge-commitment')) $('badge-commitment').textContent = commitmentItems.length + ' 条'
+        renderCommitments()
+      }
+
+      function renderCommitments() {
+        if (!$('commitment-list')) return
+        $('commitment-list').innerHTML = commitmentItems.length
+          ? commitmentItems
+              .map((item) => {
+                const statusClass = item.status === 'pending' ? 'badge sun' : (item.status === 'fulfilled' ? 'badge mint' : 'badge lav')
+                const statusLabel = item.status === 'pending' ? '待关怀' : (item.status === 'fulfilled' ? '已回响' : '已过期')
+                const timeStr = item.target_time ? fmtTime(new Date(item.target_time * 1000).toISOString()) : '-'
+                return (
+                  '<div class="memory-item"><div class="meta"><span class="' +
+                  statusClass +
+                  '">' +
+                  statusLabel +
+                  '</span><span>回响时间：' +
+                  timeStr +
+                  '</span></div><div class="body">' +
+                  esc(item.topic) +
+                  '</div><div class="actions">' +
+                  (item.status === 'pending'
+                    ? '<button class="mini-btn" type="button" data-commitment-fulfill="' +
+                      esc(item.id) +
+                      '">标记已问候</button>'
+                    : '') +
+                  '<button class="mini-btn danger" type="button" data-commitment-delete="' +
+                  esc(item.id) +
+                  '">删除</button></div></div>'
+                )
+              })
+              .join('')
+          : '<div class="empty">当前没有任何待关怀事项。</div>'
+      }
+
+      async function addCommitment() {
+        const topic = ($('commitment-topic').value || '').trim()
+        if (!topic) {
+          setMsg('commitment-msg', '关怀事项内容不能为空', 'error')
+          return
+        }
+        try {
+          await api('/ui/api/commitments/add', {
+            method: 'POST',
+            body: JSON.stringify({ topic })
+          })
+          $('commitment-topic').value = ''
+          setMsg('commitment-msg', '已添加关怀约定', 'ok')
+          await loadCommitments()
+        } catch (error) {
+          setMsg('commitment-msg', error.message, 'error')
+        }
+      }
+
+      async function fulfillCommitment(id) {
+        try {
+          await api('/ui/api/commitments/fulfill', {
+            method: 'POST',
+            body: JSON.stringify({ id })
+          })
+          setMsg('commitment-msg', '已标记问候完成', 'ok')
+          await loadCommitments()
+        } catch (error) {
+          setMsg('commitment-msg', error.message, 'error')
+        }
+      }
+
+      async function deleteCommitment(id) {
+        if (!confirm('确定删除该关怀事项？')) return
+        try {
+          await api('/ui/api/commitments/delete', {
+            method: 'POST',
+            body: JSON.stringify({ id })
+          })
+          setMsg('commitment-msg', '已删除关怀事项', 'ok')
+          await loadCommitments()
+        } catch (error) {
+          setMsg('commitment-msg', error.message, 'error')
+        }
+      }
+
+      async function loadIdentities() {
+        const res = await api('/ui/api/identities')
+        identityEntries = res.identities || {}
+        const keys = Object.keys(identityEntries)
+        if ($('badge-identity')) $('badge-identity').textContent = keys.length + ' 用户'
+        renderIdentities()
+      }
+
+      function renderIdentities() {
+        if (!$('identity-list')) return
+        const keys = Object.keys(identityEntries)
+        $('identity-list').innerHTML = keys.length
+          ? keys
+              .map((uid) => {
+                const rec = identityEntries[uid] || {}
+                return (
+                  '<div class="memory-item"><div class="meta"><span>用户 ' +
+                  esc(uid) +
+                  '</span><span>登记于 ' +
+                  fmtTime(rec.registered_at) +
+                  '</span></div><div class="body"><strong>固定锚定昵称：</strong>' +
+                  esc(rec.first_nickname || '-') +
+                  '　<span class="hint">（最近群名片：' +
+                  esc(rec.last_seen_nickname || '-') +
+                  '）</span></div><div class="actions"><button class="mini-btn" type="button" data-identity-edit="' +
+                  esc(uid) +
+                  '">修改固定昵称</button><button class="mini-btn danger" type="button" data-identity-reset="' +
+                  esc(uid) +
+                  '">重置绑定</button></div></div>'
+                )
+              })
+              .join('')
+          : '<div class="empty">还没有登记任何用户身份绑定。</div>'
+      }
+
+      async function editIdentity(uid) {
+        const rec = identityEntries[uid] || {}
+        const newName = prompt('修改用户 ' + uid + ' 的固定锚定昵称', rec.first_nickname || '')
+        if (newName === null || !newName.trim()) return
+        try {
+          await api('/ui/api/identities/set', {
+            method: 'POST',
+            body: JSON.stringify({ user_id: uid, nickname: newName.trim() })
+          })
+          setMsg('identity-msg', '已更新用户固定昵称', 'ok')
+          await loadIdentities()
+        } catch (error) {
+          setMsg('identity-msg', error.message, 'error')
+        }
+      }
+
+      async function resetIdentity(uid) {
+        if (!confirm('确定重置用户 ' + uid + ' 的固定昵称？（下次发言将重新登记）')) return
+        try {
+          await api('/ui/api/identities/reset', {
+            method: 'POST',
+            body: JSON.stringify({ user_id: uid })
+          })
+          setMsg('identity-msg', '已重置用户身份绑定', 'ok')
+          await loadIdentities()
+        } catch (error) {
+          setMsg('identity-msg', error.message, 'error')
+        }
+      }
+
       async function addNote(event) {
         event.preventDefault()
         const text = $('note-text').value.trim()
@@ -1922,6 +2135,7 @@
       $('meme-clear').addEventListener('click', clearMemes)
       $('topic-clear').addEventListener('click', clearTopics)
       $('personal-clear').addEventListener('click', clearPersonal)
+      if ($('commitment-add')) $('commitment-add').addEventListener('click', addCommitment)
       $('config-save').addEventListener('click', saveConfig)
       $('config-reload').addEventListener('click', () =>
         loadConfig().catch((error) => setMsg('config-msg', error.message, 'error'))
@@ -2001,6 +2215,26 @@
         const affinityReset = event.target.closest('[data-affinity-reset]')
         if (affinityReset) {
           resetAffinity(affinityReset.dataset.affinityReset)
+          return
+        }
+        const commitFulfill = event.target.closest('[data-commitment-fulfill]')
+        if (commitFulfill) {
+          fulfillCommitment(commitFulfill.dataset.commitmentFulfill)
+          return
+        }
+        const commitDelete = event.target.closest('[data-commitment-delete]')
+        if (commitDelete) {
+          deleteCommitment(commitDelete.dataset.commitmentDelete)
+          return
+        }
+        const identityEdit = event.target.closest('[data-identity-edit]')
+        if (identityEdit) {
+          editIdentity(identityEdit.dataset.identityEdit)
+          return
+        }
+        const identityReset = event.target.closest('[data-identity-reset]')
+        if (identityReset) {
+          resetIdentity(identityReset.dataset.identityReset)
         }
       })
 
