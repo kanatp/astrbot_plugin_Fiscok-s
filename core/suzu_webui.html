@@ -351,6 +351,122 @@
       .memory-item .actions { display: flex; gap: 6px; margin-top: 7px; }
       .mini-btn.danger { color: #c95b83; border-color: #f6cfdd; background: #fff8fb; }
       .mini-btn.danger:hover { color: #b03c68; background: #fff1f6; }
+      .mini-btn.primary {
+        background: linear-gradient(135deg, var(--pink) 0%, var(--pink-deep) 100%);
+        color: #fff;
+        border: none;
+        box-shadow: 0 4px 10px rgba(239, 119, 166, 0.22);
+        font-weight: 600;
+      }
+      .mini-btn.primary:hover {
+        filter: brightness(1.05);
+        color: #fff;
+        background: linear-gradient(135deg, var(--pink) 0%, var(--pink-deep) 100%);
+      }
+      .badge.sky { background: #f0f7ff; border-color: #dbeaff; color: #4d89e5; }
+
+      /* ---------- 虚拟日程时间轴 & CLM 账本可爱风组件 ---------- */
+      .cute-schedule-box {
+        background: linear-gradient(180deg, #fdfaff 0%, #faf5fe 100%);
+        border: 1px solid #eedff5;
+        border-radius: 16px;
+        padding: 12px 14px;
+        margin-top: 10px;
+      }
+      .cute-schedule-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 9px;
+      }
+      .cute-schedule-theme {
+        color: var(--pink-deep);
+        font-weight: 700;
+        font-size: 12.5px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .timeline-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 8px;
+        max-height: 250px;
+        overflow-y: auto;
+      }
+      .timeline-slot {
+        padding: 8px 10px;
+        border-radius: 12px;
+        background: #ffffff;
+        border: 1px solid var(--line);
+        transition: all 0.16s ease;
+      }
+      .timeline-slot:hover {
+        border-color: #f7d2e1;
+        box-shadow: 0 2px 8px rgba(255, 159, 196, 0.1);
+      }
+      .timeline-slot.current {
+        border: 1.5px solid var(--pink);
+        background: linear-gradient(135deg, #fff7fb 0%, #faf4ff 100%);
+        box-shadow: 0 4px 12px rgba(239, 119, 166, 0.15);
+      }
+      .timeline-slot .slot-time {
+        font-size: 11px;
+        color: var(--muted);
+        font-weight: 700;
+        margin-bottom: 3px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .timeline-slot .slot-act {
+        font-size: 12px;
+        line-height: 1.45;
+        color: var(--text);
+        word-break: break-word;
+      }
+
+      .clm-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin-top: 12px;
+      }
+      @media (max-width: 860px) {
+        .clm-grid { grid-template-columns: 1fr; }
+      }
+      .clm-panel {
+        background: linear-gradient(180deg, #fdfaff 0%, #faf6fd 100%);
+        border: 1px solid #efe3f5;
+        border-radius: 14px;
+        padding: 12px 14px;
+      }
+      .clm-panel-head {
+        font-size: 12.5px;
+        font-weight: 700;
+        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .clm-item-pill {
+        padding: 6px 10px;
+        border-radius: 10px;
+        background: #ffffff;
+        border: 1px solid #f2e9f7;
+        margin-bottom: 6px;
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--text);
+        word-break: break-word;
+      }
+      .clm-summary-box {
+        margin-top: 12px;
+        background: linear-gradient(180deg, #fdfaff 0%, #faf6fd 100%);
+        border: 1px solid #efe3f5;
+        border-radius: 14px;
+        padding: 12px 14px;
+      }
       .head-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
       .desktop-link { margin-top: 12px; display: grid; gap: 6px; }
       .desktop-link .btn { text-decoration: none; font-size: 12.5px; padding: 8px 14px; }
@@ -749,7 +865,7 @@
         <section class="card col-6" data-tab="overview">
           <div class="card-head">
             <div>
-              <h2>人设与情绪</h2>
+              <h2>人设与情感状态</h2>
               <p class="hint">基线来自 AstrBot，演化自我设定两边共享</p>
             </div>
             <button id="btn-evolve" class="btn btn-ghost" type="button">演化一次</button>
@@ -762,17 +878,26 @@
         <section class="card col-6" data-tab="overview">
           <div class="card-head">
             <div>
-              <h2>多端在场与虚拟生活轴</h2>
-              <p class="hint">PC 在场感知、QQ 主动免打扰、虚拟日常与自主行进任务</p>
+              <h2>虚拟生活轴与今日日程</h2>
+              <p class="hint">模型每夜自主规划的 24 小时生活日程与今日主题</p>
             </div>
             <div class="head-actions">
-              <button id="btn-regen-life" class="mini-btn" type="button">重构今日日程</button>
-              <span id="badge-presence" class="badge mint">实时协同</span>
+              <button id="btn-regen-life" class="mini-btn primary" type="button">重构今日日程</button>
             </div>
+          </div>
+          <div id="life-schedule-box"></div>
+        </section>
+
+        <section class="card col-6" data-tab="overview">
+          <div class="card-head">
+            <div>
+              <h2>多端在场与进行中任务</h2>
+              <p class="hint">PC 在场感知、QQ 主动免打扰与正在自主推进的长任务</p>
+            </div>
+            <span id="badge-presence" class="badge mint">实时协同</span>
           </div>
           <div class="kv" id="presence-kv"></div>
           <div id="progression-box" style="margin-top:12px;"></div>
-          <div id="life-schedule-box" style="margin-top:12px;"></div>
         </section>
 
         <section class="card col-12" data-tab="memes">
@@ -869,19 +994,19 @@
             </div>
           </div>
           <div class="kv" id="clm-meta-kv"></div>
-          <div style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-            <div style="background:var(--bg-elevated,#1c2128);padding:10px;border-radius:8px;">
-              <strong style="color:var(--amber,#f5a623);">【核心目标与顶层约束 (Pinned)】</strong>
-              <div id="clm-anchors" style="margin-top:6px;font-size:13px;"></div>
+          <div class="clm-grid">
+            <div class="clm-panel">
+              <div class="clm-panel-head" style="color:var(--pink-deep);">📌 核心目标与顶层约束 (Pinned)</div>
+              <div id="clm-anchors"></div>
             </div>
-            <div style="background:var(--bg-elevated,#1c2128);padding:10px;border-radius:8px;">
-              <strong style="color:var(--mint,#3dd68c);">【关键事实与已确认要点】</strong>
-              <div id="clm-facts" style="margin-top:6px;font-size:13px;"></div>
+            <div class="clm-panel">
+              <div class="clm-panel-head" style="color:#7f6fd8;">🔹 关键事实与已确认要点</div>
+              <div id="clm-facts"></div>
             </div>
           </div>
-          <div style="margin-top:12px;background:var(--bg-elevated,#1c2128);padding:10px;border-radius:8px;">
-            <strong style="color:var(--sky,#58a6ff);">【历史历程概要】</strong>
-            <div id="clm-summary" style="margin-top:6px;font-size:13px;line-height:1.5;"></div>
+          <div class="clm-summary-box">
+            <div class="clm-panel-head" style="color:#3f9c81;">📖 历史历程概要</div>
+            <div id="clm-summary" style="font-size:12px;line-height:1.6;color:var(--text);word-break:break-word;"></div>
           </div>
           <div class="msg" id="clm-msg"></div>
         </section>
@@ -1133,21 +1258,20 @@
 
         if ($('presence-kv')) {
           const progSummary = progressions.length
-            ? '<span style="color:var(--mint,#3dd68c);font-weight:bold">进行中（' + progressions.length + ' 个任务）</span>'
-            : '空闲（无持续任务）'
+            ? '<span class="badge sun">进行中 (' + progressions.length + ')</span>'
+            : '<span class="badge mint">空闲中</span>'
           $('presence-kv').innerHTML = kv([
-            ['桌面端状态', presence.active ? '<span style="color:var(--mint,#3dd68c);font-weight:bold">PC在场（活跃中）</span>' : '离线 / 暂无活动'],
-            ['QQ主动避让', presence.suppressQQ ? '<span style="color:var(--amber,#f5a623);font-weight:bold">已开启免打扰（用户在PC前）</span>' : '正常监听'],
+            ['桌面端状态', presence.active ? '<span class="badge mint">PC 在场（活跃中）</span>' : '<span class="badge lav">离线 / 暂无活动</span>'],
+            ['QQ 私聊避让', presence.suppressQQ ? '<span class="badge sun">已开启免打扰</span>' : '<span class="badge mint">正常监听</span>'],
             ['自主行进任务', progSummary],
-            ['羁绊阶段', esc(bond.stage || '初识阶段')],
-            ['今日生活状态', esc(life.activity || '休息中')],
+            ['当前羁绊阶段', '<span class="badge">' + esc(bond.stage || '初识阶段') + '</span>'],
             ['生活氛围节点', esc(life.circadian || '-')]
           ])
         }
 
         if ($('progression-box')) {
           $('progression-box').innerHTML = progressions.length
-            ? '<div style="margin-bottom:6px;font-size:12px;font-weight:bold;color:var(--ink-muted,#8b949e);">当前自主进行中的任务：</div>' +
+            ? '<div style="margin-bottom:8px;font-size:12px;font-weight:700;color:var(--pink-deep);">🌸 正在自主推进的长任务：</div>' +
               progressions
                 .map(
                   (p) =>
@@ -1156,19 +1280,19 @@
                     '/' +
                     esc(p.max_rounds) +
                     ' 轮</span><span>' +
-                    (p.is_waiting ? '等待中' : '推进中') +
+                    (p.is_waiting ? '⏳ 等待中' : '🚀 推进中') +
                     ' · 待合并 ' +
                     esc(p.pending_count) +
                     ' 条</span></div><div class="body"><strong>目标：</strong>' +
                     esc(p.task_goal) +
-                    '<br><strong>下一步：</strong>' +
+                    '<br><strong style="color:var(--lav);">下一步：</strong>' +
                     esc(p.next_step) +
                     '</div><div class="actions"><button class="mini-btn danger" type="button" data-progression-stop="' +
                     esc(p.umo) +
                     '">终止任务</button></div></div>'
                 )
                 .join('')
-            : ''
+            : '<div class="empty" style="padding:8px 0;">当前没有正在自主推进的任务~</div>'
         }
 
         if ($('life-schedule-box')) {
@@ -1178,38 +1302,34 @@
           const currentHour = new Date().getHours()
 
           $('life-schedule-box').innerHTML =
-            '<div style="background:var(--bg-elevated,#1c2128);padding:10px;border-radius:8px;">' +
-            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">' +
-            '<strong style="color:var(--amber,#f5a623);font-size:13px;">🌿 今日生活主题：' +
+            '<div class="cute-schedule-box">' +
+            '<div class="cute-schedule-header">' +
+            '<span class="cute-schedule-theme">🌿 今日生活主题：' +
             esc(theme) +
-            '</strong>' +
+            '</span>' +
             (sched.is_fallback
               ? '<span class="badge sun">保底情景池</span>'
               : '<span class="badge mint">模型自主规划</span>') +
             '</div>' +
-            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;max-height:220px;overflow-y:auto;">' +
+            '<div class="timeline-grid">' +
             slots
               .map((s) => {
                 const isCurrent = s.start <= currentHour && currentHour < s.end
-                const borderStyle = isCurrent
-                  ? 'border:1px solid var(--mint,#3dd68c);background:rgba(61,214,140,0.1);'
-                  : 'background:rgba(255,255,255,0.03);'
                 const tag = isCurrent
-                  ? '<span style="color:var(--mint,#3dd68c);font-weight:bold;">[当前]</span> '
+                  ? '<span class="badge" style="font-size:10px;padding:2px 6px;">当前进行中</span>'
                   : ''
                 return (
-                  '<div style="padding:6px;border-radius:6px;' +
-                  borderStyle +
-                  '">' +
-                  '<div style="font-size:11px;color:var(--ink-muted,#8b949e);font-weight:bold;">⏰ ' +
+                  '<div class="timeline-slot' + (isCurrent ? ' current' : '') + '">' +
+                  '<div class="slot-time"><span>⏰ ' +
                   String(s.start).padStart(2, '0') +
                   ':00-' +
                   String(s.end).padStart(2, '0') +
                   ':00 · ' +
                   esc(s.period) +
-                  '</div>' +
-                  '<div style="font-size:12px;margin-top:2px;line-height:1.4;">' +
+                  '</span>' +
                   tag +
+                  '</div>' +
+                  '<div class="slot-act">' +
                   esc(s.activity) +
                   '</div></div>'
                 )
@@ -1750,7 +1870,7 @@
                   esc(item.topic) +
                   '</div><div class="actions">' +
                   (item.status === 'pending'
-                    ? '<button class="mini-btn" type="button" data-commitment-fulfill="' +
+                    ? '<button class="mini-btn primary" type="button" data-commitment-fulfill="' +
                       esc(item.id) +
                       '">标记已问候</button>'
                     : '') +
@@ -1904,12 +2024,12 @@
           ])
 
           $('clm-anchors').innerHTML = anchors.length
-            ? anchors.map((a) => '<div style="margin-bottom:4px;padding:4px 8px;background:rgba(255,255,255,0.05);border-radius:4px;">📌 ' + esc(a) + '</div>').join('')
-            : '<div class="empty">暂无锚定约束</div>'
+            ? anchors.map((a) => '<div class="clm-item-pill">📌 ' + esc(a) + '</div>').join('')
+            : '<div class="empty" style="padding:6px 0;">暂无锚定约束</div>'
 
           $('clm-facts').innerHTML = facts.length
-            ? facts.map((f) => '<div style="margin-bottom:4px;padding:4px 8px;background:rgba(255,255,255,0.05);border-radius:4px;">🔹 ' + esc(f) + '</div>').join('')
-            : '<div class="empty">暂无关键事实</div>'
+            ? facts.map((f) => '<div class="clm-item-pill">🔹 ' + esc(f) + '</div>').join('')
+            : '<div class="empty" style="padding:6px 0;">暂无关键事实</div>'
 
           $('clm-summary').textContent = summary
         } catch (error) {
