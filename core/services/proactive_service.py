@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 
 from astrbot.api import logger
 from ..api.provider_utils import get_aux_provider
+from ..prompt_library import render_template
 
 # 标准 8 个时段区间划分
 _SCHEDULE_SLOTS = [
@@ -272,7 +273,8 @@ class ProactiveService:
             day_type_desc = f"{wday_str}（{is_weekend_str}）" + (f"，今天是【{special_day}】！" if special_day else "")
 
             prompt_tmpl = prompt_library.get("bot_daily_schedule_prompt")
-            prompt = prompt_tmpl.format(
+            prompt = render_template(
+                prompt_tmpl,
                 date=target_date,
                 day_type=day_type_desc,
                 persona=persona_prompt or "可爱的陪伴型机器人伙伴",

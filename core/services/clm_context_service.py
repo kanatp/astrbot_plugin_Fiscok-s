@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from astrbot.api import logger
 from ..api.provider_utils import get_aux_provider
+from ..prompt_library import render_template
 
 
 class ContextFile:
@@ -243,7 +244,8 @@ class CLMContextService:
             summary_str = cf.milestone_summary or "（暂无）"
 
             prompt_tmpl = self.plugin.prompt_library.get("clm_compaction_prompt")
-            prompt = prompt_tmpl.format(
+            prompt = render_template(
+                prompt_tmpl,
                 pinned_anchors=pinned_str,
                 distilled_facts=facts_str,
                 milestone_summary=summary_str,
