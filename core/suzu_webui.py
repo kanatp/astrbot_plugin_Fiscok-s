@@ -234,6 +234,12 @@ class SuzuWebUI:
         app.router.add_get("/ui/api/identities", self._identities_get)
         app.router.add_post("/ui/api/identities/set", self._identities_set)
         app.router.add_post("/ui/api/identities/reset", self._identities_reset)
+        app.router.add_post("/ui/api/progression/stop", self._progression_stop)
+        app.router.add_get("/ui/api/clm/context", self._clm_context_get)
+        app.router.add_post("/ui/api/clm/compact", self._clm_context_compact)
+        app.router.add_post("/ui/api/clm/reset", self._clm_context_reset)
+        app.router.add_get("/ui/api/life/schedule", self._life_schedule_get)
+        app.router.add_post("/ui/api/life/regenerate", self._life_schedule_regenerate)
 
     async def _page(self, request: web.Request) -> web.Response:
         return web.Response(
@@ -411,6 +417,7 @@ class SuzuWebUI:
             "life": {
                 "activity": plugin.proactive_service.get_bot_current_activity() if hasattr(plugin, "proactive_service") and plugin.proactive_service else "",
                 "circadian": plugin.proactive_service.get_circadian_hint(user_id) if hasattr(plugin, "proactive_service") and plugin.proactive_service else "",
+                "schedule": plugin.proactive_service.get_today_schedule() if hasattr(plugin, "proactive_service") and plugin.proactive_service else {},
             },
             "bond": {
                 "stage": plugin.emotion_service.get_bond_stage(affinity)[0] if hasattr(plugin, "emotion_service") and plugin.emotion_service else "",
@@ -428,6 +435,7 @@ class SuzuWebUI:
                 "count": len(memories),
                 "items": [bridge._memory_item(item) for item in memories[:30]],
             },
+            "progressions": plugin.progression_service.get_all_active_sessions() if hasattr(plugin, "progression_service") and plugin.progression_service else [],
             "features": features,
         }
 
@@ -1154,3 +1162,79 @@ class SuzuWebUI:
             return _json({"ok": False, "error": "用户ID不能为空"}, 400)
         success = self.plugin.nickname_service.reset_anchored_nickname(user_id)
         return _json({"ok": success})
+
+    async def _progression_stop(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        data = await _read_json(request)
+        umo = str(data.get("umo") or "").strip()
+        if not umo:
+            return _json({"ok": False, "error": "缺少 umo 参数"}, 400)
+        if hasattr(self.plugin, "progression_service") and self.plugin.progression_service:
+            success = self.plugin.progression_service.stop_session(umo, "WebUI 手动终止")
+            return _json({"ok": success})
+        return _json({"ok": False, "error": "行进服务未就绪"}, 500)
+
+    # ---------------- CLM 上下文即文件 (Context as a File) ----------------
+
+    async def _clm_context_get(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        umo = str(request.query.get("umo") or "").strip()
+        if not umo and hasattr(self.bridge, "_unified_msg_origin"):
+            umo = self.bridge._unified_msg_origin()
+        if hasattr(self.plugin, "clm_context_service") and self.plugin.clm_context_service and umo:
+            cf = self.plugin.clm_context_service.get_context_file(umo)
+            return _json({"ok": True, "context": cf.to_dict()})
+        return _json({"ok": True, "context": None})
+
+    async def _clm_context_compact(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        data = await _read_json(request)
+        umo = str(data.get("umo") or "").strip()
+        if not umo and hasattr(self.bridge, "_unified_msg_origin"):
+            umo = self.bridge._unified_msg_origin()
+        if hasattr(self.plugin, "clm_context_service") and self.plugin.clm_context_service and umo:
+            cfg = self.plugin.config.get("context_optimize_config", {})
+            success = await self.plugin.clm_context_service.compact_context_file(umo, cfg)
+            cf = self.plugin.clm_context_service.get_context_file(umo)
+            return _json({"ok": success, "context": cf.to_dict()})
+        return _json({"ok": False, "error": "CLM 上下文服务未就绪"}, 500)
+
+    async def _clm_context_reset(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        data = await _read_json(request)
+        umo = str(data.get("umo") or "").strip()
+        if not umo and hasattr(self.bridge, "_unified_msg_origin"):
+            umo = self.bridge._unified_msg_origin()
+        if hasattr(self.plugin, "clm_context_service") and self.plugin.clm_context_service and umo:
+            success = self.plugin.clm_context_service.reset_context_file(umo)
+            return _json({"ok": success})
+        return _json({"ok": False, "error": "CLM 上下文服务未就绪"}, 500)
+
+    # ---------------- 机器人日常生活日程 ----------------
+
+    async def _life_schedule_get(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        if hasattr(self.plugin, "proactive_service") and self.plugin.proactive_service:
+            data = self.plugin.proactive_service.get_today_schedule()
+            return _json({"ok": True, "schedule": data})
+        return _json({"ok": False, "error": "主动服务未就绪"}, 500)
+
+    async def _life_schedule_regenerate(self, request: web.Request) -> web.Response:
+        guard = self._guard(request)
+        if guard:
+            return guard
+        if hasattr(self.plugin, "_generate_today_life_schedule"):
+            success = await self.plugin._generate_today_life_schedule()
+            schedule = self.plugin.proactive_service.get_today_schedule()
+            return _json({"ok": success, "schedule": schedule})
+        return _json({"ok": False, "error": "生成日程方法未就绪"}, 500)

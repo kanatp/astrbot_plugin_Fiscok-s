@@ -617,6 +617,50 @@
       }
     }
   },
+  "topic_progression_config": {
+    "description": "话题自动行进配置（连续多步自主任务推进引擎）",
+    "type": "object",
+    "items": {
+      "available": {
+        "description": "是否启用话题自动行进引擎（长任务/讲故事/汇报连续自主推进）",
+        "type": "bool",
+        "default": true
+      },
+      "llm_provider_id": {
+        "description": "自主推进所使用的 Provider ID（留空使用默认）",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空使用默认 Provider"
+      },
+      "interval_seconds": {
+        "description": "发送下一任务阶段前的等待秒数（留出用户反应与阅读时间）",
+        "type": "float",
+        "default": 5.0,
+        "hint": "建议 4.0~8.0 秒"
+      },
+      "reset_seconds_on_user_input": {
+        "description": "收到用户消息后重置的等待秒数（允许用户打字连发）",
+        "type": "float",
+        "default": 3.5
+      },
+      "max_rounds": {
+        "description": "一次任务的最大自主推进轮数上限（防止过度循环）",
+        "type": "int",
+        "default": 12
+      },
+      "allow_group": {
+        "description": "是否允许在群聊中触发自动行进（关闭则仅在私聊生效）",
+        "type": "bool",
+        "default": true
+      },
+      "stop_keywords": {
+        "description": "用户中途终止任务的关键词（逗号分隔）",
+        "type": "string",
+        "default": "停止,停下,别讲了,结束,闭嘴,打住,不用讲了,不用说了"
+      }
+    }
+  },
   "proactive_chat_config": {
     "description": "主动发起聊天（群聊冷场时主动开口）配置",
     "type": "object",
@@ -726,24 +770,77 @@
       }
     }
   },
-  "context_optimize_config": {
-    "description": "上下文精简（降低上下文 token 开销）",
+  "bot_life_config": {
+    "description": "机器人虚拟日常生活日程（模型夜间自主规划 24 小时生活轨迹）",
     "type": "object",
     "items": {
       "available": {
-        "description": "是否启用上下文精简（由插件接管请求上下文裁剪）",
+        "description": "是否启用机器人自主虚拟生活日程系统",
         "type": "bool",
-        "default": false
+        "default": true
+      },
+      "llm_provider_id": {
+        "description": "日程生成所用 Provider ID（留空使用默认模型）",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空使用默认 Provider，在夜间后台异步规划"
+      },
+      "auto_generate_daily": {
+        "description": "是否每夜自动调用模型规划下一天日程",
+        "type": "bool",
+        "default": true
+      },
+      "generate_hour": {
+        "description": "夜间自动规划日程的触发小时（0-23，默认凌晨 3 点）",
+        "type": "int",
+        "default": 3
+      }
+    }
+  },
+  "context_optimize_config": {
+    "description": "上下文管理策略（Meta CLM 上下文即文件自主管理与精简）",
+    "type": "object",
+    "items": {
+      "strategy": {
+        "description": "上下文管理策略模式",
+        "type": "string",
+        "default": "clm",
+        "hint": "clm (基于Meta论文的Context as a File自主工作记忆管理，大幅降低Token且永不遗忘关键约束) / trim (传统机械滑窗裁剪) / off (关闭，完全由AstrBot原生接管)"
+      },
+      "llm_provider_id": {
+        "description": "CLM 自主工作记忆整理所用辅助 Provider（留空使用默认轻量模型）",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空使用默认轻量 Provider，后台异步整理，不阻塞聊天"
+      },
+      "compact_every_turns": {
+        "description": "每隔多少轮对话触发一次 CLM 自主工作记忆整理与剪枝",
+        "type": "int",
+        "default": 8,
+        "hint": "推荐 6~12 轮"
+      },
+      "keep_buffer_turns": {
+        "description": "直传给主模型的最新对话缓冲条数（保留即时自然语境）",
+        "type": "int",
+        "default": 6,
+        "hint": "推荐 4~8 条（1 轮=2 条），其余历史均由工作记忆账本提炼承载"
+      },
+      "max_anchors": {
+        "description": "工作记忆账本中最多保留的核心锚定/约束项数",
+        "type": "int",
+        "default": 5
+      },
+      "max_facts": {
+        "description": "工作记忆账本中最多保留的关键事实项数",
+        "type": "int",
+        "default": 12
       },
       "keep_recent_messages": {
-        "description": "保留最近的消息条数（1 条≈半轮；0 表示不按条数裁剪）",
+        "description": "传统 trim 模式下保留的最近消息条数（strategy=trim 时生效）",
         "type": "int",
         "default": 10
-      },
-      "max_context_chars": {
-        "description": "上下文总字符上限（超出则丢弃更早消息；0 表示不限制）",
-        "type": "int",
-        "default": 0
       }
     }
   },

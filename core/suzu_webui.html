@@ -763,11 +763,16 @@
           <div class="card-head">
             <div>
               <h2>多端在场与虚拟生活轴</h2>
-              <p class="hint">PC 在场感知、QQ 主动免打扰与今日虚拟日常</p>
+              <p class="hint">PC 在场感知、QQ 主动免打扰、虚拟日常与自主行进任务</p>
             </div>
-            <span id="badge-presence" class="badge mint">实时协同</span>
+            <div class="head-actions">
+              <button id="btn-regen-life" class="mini-btn" type="button">重构今日日程</button>
+              <span id="badge-presence" class="badge mint">实时协同</span>
+            </div>
           </div>
           <div class="kv" id="presence-kv"></div>
+          <div id="progression-box" style="margin-top:12px;"></div>
+          <div id="life-schedule-box" style="margin-top:12px;"></div>
         </section>
 
         <section class="card col-12" data-tab="memes">
@@ -850,6 +855,35 @@
           </div>
           <div class="memory-list" id="identity-list"></div>
           <div class="msg" id="identity-msg"></div>
+        </section>
+
+        <section class="card col-12" data-tab="memory">
+          <div class="card-head">
+            <div>
+              <h2>CLM 上下文工作记忆账本 (Context as a File)</h2>
+              <p class="hint">基于 Meta FAIR 最新论文《Context Language Models》：模型自主维护核心约束、关键事实与历程，取代机械滑窗</p>
+            </div>
+            <div class="head-actions">
+              <button id="clm-compact-btn" class="mini-btn primary" type="button">自主整理压缩</button>
+              <button id="clm-reset-btn" class="mini-btn danger" type="button">重置账本</button>
+            </div>
+          </div>
+          <div class="kv" id="clm-meta-kv"></div>
+          <div style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div style="background:var(--bg-elevated,#1c2128);padding:10px;border-radius:8px;">
+              <strong style="color:var(--amber,#f5a623);">【核心目标与顶层约束 (Pinned)】</strong>
+              <div id="clm-anchors" style="margin-top:6px;font-size:13px;"></div>
+            </div>
+            <div style="background:var(--bg-elevated,#1c2128);padding:10px;border-radius:8px;">
+              <strong style="color:var(--mint,#3dd68c);">【关键事实与已确认要点】</strong>
+              <div id="clm-facts" style="margin-top:6px;font-size:13px;"></div>
+            </div>
+          </div>
+          <div style="margin-top:12px;background:var(--bg-elevated,#1c2128);padding:10px;border-radius:8px;">
+            <strong style="color:var(--sky,#58a6ff);">【历史历程概要】</strong>
+            <div id="clm-summary" style="margin-top:6px;font-size:13px;line-height:1.5;"></div>
+          </div>
+          <div class="msg" id="clm-msg"></div>
         </section>
 
         <section class="card col-12" data-tab="emotion">
@@ -1095,15 +1129,93 @@
         const presence = data.presence || {}
         const life = data.life || {}
         const bond = data.bond || {}
+        const progressions = data.progressions || []
 
         if ($('presence-kv')) {
+          const progSummary = progressions.length
+            ? '<span style="color:var(--mint,#3dd68c);font-weight:bold">进行中（' + progressions.length + ' 个任务）</span>'
+            : '空闲（无持续任务）'
           $('presence-kv').innerHTML = kv([
             ['桌面端状态', presence.active ? '<span style="color:var(--mint,#3dd68c);font-weight:bold">PC在场（活跃中）</span>' : '离线 / 暂无活动'],
             ['QQ主动避让', presence.suppressQQ ? '<span style="color:var(--amber,#f5a623);font-weight:bold">已开启免打扰（用户在PC前）</span>' : '正常监听'],
+            ['自主行进任务', progSummary],
             ['羁绊阶段', esc(bond.stage || '初识阶段')],
             ['今日生活状态', esc(life.activity || '休息中')],
             ['生活氛围节点', esc(life.circadian || '-')]
           ])
+        }
+
+        if ($('progression-box')) {
+          $('progression-box').innerHTML = progressions.length
+            ? '<div style="margin-bottom:6px;font-size:12px;font-weight:bold;color:var(--ink-muted,#8b949e);">当前自主进行中的任务：</div>' +
+              progressions
+                .map(
+                  (p) =>
+                    '<div class="memory-item"><div class="meta"><span class="badge sun">第 ' +
+                    esc(p.round) +
+                    '/' +
+                    esc(p.max_rounds) +
+                    ' 轮</span><span>' +
+                    (p.is_waiting ? '等待中' : '推进中') +
+                    ' · 待合并 ' +
+                    esc(p.pending_count) +
+                    ' 条</span></div><div class="body"><strong>目标：</strong>' +
+                    esc(p.task_goal) +
+                    '<br><strong>下一步：</strong>' +
+                    esc(p.next_step) +
+                    '</div><div class="actions"><button class="mini-btn danger" type="button" data-progression-stop="' +
+                    esc(p.umo) +
+                    '">终止任务</button></div></div>'
+                )
+                .join('')
+            : ''
+        }
+
+        if ($('life-schedule-box')) {
+          const sched = life.schedule || {}
+          const theme = sched.day_theme || '日常的一天'
+          const slots = sched.schedule || []
+          const currentHour = new Date().getHours()
+
+          $('life-schedule-box').innerHTML =
+            '<div style="background:var(--bg-elevated,#1c2128);padding:10px;border-radius:8px;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">' +
+            '<strong style="color:var(--amber,#f5a623);font-size:13px;">🌿 今日生活主题：' +
+            esc(theme) +
+            '</strong>' +
+            (sched.is_fallback
+              ? '<span class="badge sun">保底情景池</span>'
+              : '<span class="badge mint">模型自主规划</span>') +
+            '</div>' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;max-height:220px;overflow-y:auto;">' +
+            slots
+              .map((s) => {
+                const isCurrent = s.start <= currentHour && currentHour < s.end
+                const borderStyle = isCurrent
+                  ? 'border:1px solid var(--mint,#3dd68c);background:rgba(61,214,140,0.1);'
+                  : 'background:rgba(255,255,255,0.03);'
+                const tag = isCurrent
+                  ? '<span style="color:var(--mint,#3dd68c);font-weight:bold;">[当前]</span> '
+                  : ''
+                return (
+                  '<div style="padding:6px;border-radius:6px;' +
+                  borderStyle +
+                  '">' +
+                  '<div style="font-size:11px;color:var(--ink-muted,#8b949e);font-weight:bold;">⏰ ' +
+                  String(s.start).padStart(2, '0') +
+                  ':00-' +
+                  String(s.end).padStart(2, '0') +
+                  ':00 · ' +
+                  esc(s.period) +
+                  '</div>' +
+                  '<div style="font-size:12px;margin-top:2px;line-height:1.4;">' +
+                  tag +
+                  esc(s.activity) +
+                  '</div></div>'
+                )
+              })
+              .join('') +
+            '</div></div>'
         }
 
         $('badge-memory').textContent = (memory.count || 0) + ' 条'
@@ -1139,6 +1251,7 @@
           loadPersonal().catch((error) => setMsg('personal-msg', error.message, 'error')),
           loadCommitments().catch((error) => setMsg('commitment-msg', error.message, 'error')),
           loadIdentities().catch((error) => setMsg('identity-msg', error.message, 'error')),
+          loadCLMContext().catch((error) => setMsg('clm-msg', error.message, 'error')),
           loadEmotion().catch((error) => setMsg('emotion-hint', error.message, 'error'))
         ])
       }
@@ -1761,6 +1874,95 @@
         }
       }
 
+      async function stopProgression(umo) {
+        if (!confirm('确定终止此持续推进任务？')) return
+        try {
+          await api('/ui/api/progression/stop', {
+            method: 'POST',
+            body: JSON.stringify({ umo })
+          })
+          await refresh()
+        } catch (error) {
+          alert('终止失败: ' + error.message)
+        }
+      }
+
+      async function loadCLMContext() {
+        if (!$('clm-meta-kv')) return
+        try {
+          const res = await api('/ui/api/clm/context')
+          const ctx = res.context || {}
+          const anchors = ctx.pinned_anchors || []
+          const facts = ctx.distilled_facts || []
+          const summary = ctx.milestone_summary || '（暂无历史历程概要）'
+
+          $('clm-meta-kv').innerHTML = kv([
+            ['关联会话', esc(ctx.umo || '桌面/默认会话')],
+            ['轮数累计', (ctx.turn_count || 0) + ' 轮（满阈值自动整理）'],
+            ['上次整理时间', fmtTime(ctx.last_compacted_at)],
+            ['即时对话缓冲', (ctx.recent_buffer ? ctx.recent_buffer.length : 0) + ' 条（紧凑模式）']
+          ])
+
+          $('clm-anchors').innerHTML = anchors.length
+            ? anchors.map((a) => '<div style="margin-bottom:4px;padding:4px 8px;background:rgba(255,255,255,0.05);border-radius:4px;">📌 ' + esc(a) + '</div>').join('')
+            : '<div class="empty">暂无锚定约束</div>'
+
+          $('clm-facts').innerHTML = facts.length
+            ? facts.map((f) => '<div style="margin-bottom:4px;padding:4px 8px;background:rgba(255,255,255,0.05);border-radius:4px;">🔹 ' + esc(f) + '</div>').join('')
+            : '<div class="empty">暂无关键事实</div>'
+
+          $('clm-summary').textContent = summary
+        } catch (error) {
+          setMsg('clm-msg', error.message, 'error')
+        }
+      }
+
+      async function compactCLM() {
+        $('clm-compact-btn').disabled = true
+        setMsg('clm-msg', '模型正在自主整理与浓缩上下文工作记忆账本，请稍候…')
+        try {
+          const res = await api('/ui/api/clm/compact', { method: 'POST', body: '{}' })
+          setMsg('clm-msg', res.ok ? 'CLM 工作记忆整理完成！' : '整理未产生变动', res.ok ? 'ok' : 'error')
+          await loadCLMContext()
+        } catch (error) {
+          setMsg('clm-msg', error.message, 'error')
+        } finally {
+          $('clm-compact-btn').disabled = false
+        }
+      }
+
+      async function resetCLM() {
+        if (!confirm('确定清空重置当前会话的上下文工作记忆账本？')) return
+        $('clm-reset-btn').disabled = true
+        try {
+          await api('/ui/api/clm/reset', { method: 'POST', body: '{}' })
+          setMsg('clm-msg', '已重置上下文工作记忆账本', 'ok')
+          await loadCLMContext()
+        } catch (error) {
+          setMsg('clm-msg', error.message, 'error')
+        } finally {
+          $('clm-reset-btn').disabled = false
+        }
+      }
+
+      async function regenerateLifeSchedule() {
+        $('btn-regen-life').disabled = true
+        $('btn-regen-life').textContent = '规划中…'
+        try {
+          const res = await api('/ui/api/life/regenerate', { method: 'POST', body: '{}' })
+          if (res.ok) {
+            await refresh()
+          } else {
+            alert('规划失败，请检查模型 Provider 设置')
+          }
+        } catch (error) {
+          alert('请求失败: ' + error.message)
+        } finally {
+          $('btn-regen-life').disabled = false
+          $('btn-regen-life').textContent = '重构今日日程'
+        }
+      }
+
       async function addNote(event) {
         event.preventDefault()
         const text = $('note-text').value.trim()
@@ -2110,6 +2312,7 @@
       })
       $('btn-logout').addEventListener('click', logout)
       $('btn-evolve').addEventListener('click', evolve)
+      if ($('btn-regen-life')) $('btn-regen-life').addEventListener('click', regenerateLifeSchedule)
       $('note-form').addEventListener('submit', addNote)
 
       let memeSearchTimer = null
@@ -2136,6 +2339,8 @@
       $('topic-clear').addEventListener('click', clearTopics)
       $('personal-clear').addEventListener('click', clearPersonal)
       if ($('commitment-add')) $('commitment-add').addEventListener('click', addCommitment)
+      if ($('clm-compact-btn')) $('clm-compact-btn').addEventListener('click', compactCLM)
+      if ($('clm-reset-btn')) $('clm-reset-btn').addEventListener('click', resetCLM)
       $('config-save').addEventListener('click', saveConfig)
       $('config-reload').addEventListener('click', () =>
         loadConfig().catch((error) => setMsg('config-msg', error.message, 'error'))
@@ -2235,6 +2440,11 @@
         const identityReset = event.target.closest('[data-identity-reset]')
         if (identityReset) {
           resetIdentity(identityReset.dataset.identityReset)
+          return
+        }
+        const progStop = event.target.closest('[data-progression-stop]')
+        if (progStop) {
+          stopProgression(progStop.dataset.progressionStop)
         }
       })
 

@@ -9,6 +9,8 @@ from .typing_service import TypingService
 from .commitment_service import CommitmentTrackerService
 from .presence_service import PresenceService
 from .proactive_service import ProactiveService
+from .progression_service import TopicProgressionService
+from .clm_context_service import CLMContextService
 
 __all__ = [
     "NicknameAnchorService",
@@ -18,4 +20,6 @@ __all__ = [
     "CommitmentTrackerService",
     "PresenceService",
     "ProactiveService",
+    "TopicProgressionService",
+    "CLMContextService",
 ]

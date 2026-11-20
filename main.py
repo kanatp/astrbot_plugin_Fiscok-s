@@ -51,7 +51,10 @@ from .core.services import (
     CommitmentTrackerService,
     PresenceService,
     ProactiveService,
+    TopicProgressionService,
+    CLMContextService,
 )
+from .core.services.progression_service import _PROGRESSION_TAG_RE
 from .core.net.twitter_fetch import fetch_twitter_data, check_availability
 from .core.net.instagram_fetch import create_loader, fetch_instagram_posts, fetch_instagram_stories, check_instagram_access
 
@@ -103,7 +106,7 @@ def _strip_internal_leaks(text: str) -> str:
     return text
 
 
-@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "3.0")
+@register("Fiscok-s Plugins", "Fiscok", "Fiscok自用插件", "3.3")
 class Core(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -115,7 +118,7 @@ class Core(Star):
         # 提示词库：只由插件 WebUI 维护，不进入 AstrBot 插件配置
         self.prompt_library = PromptLibrary(self)
 
-        # 初始化核心服务层（用户身份锚定、消息合并、情绪隔离衰减、拟真打字、在场协同、约定关怀、主动聊天持久化）
+        # 初始化核心服务层（用户身份锚定、消息合并、情绪隔离衰减、拟真打字、在场协同、约定关怀、主动聊天持久化、话题自动行进）
         self.nickname_service = NicknameAnchorService(self.data_manager.root)
         self.merge_service = MergeService()
         self.emotion_service = EmotionService(self.data_manager, self.config)
@@ -123,6 +126,8 @@ class Core(Star):
         self.presence_service = PresenceService()
         self.commitment_service = CommitmentTrackerService(self.data_manager.root)
         self.proactive_service = ProactiveService(self.data_manager.root)
+        self.progression_service = TopicProgressionService(self)
+        self.clm_context_service = CLMContextService(self, self.data_manager.root)
 
         # 后台任务：辅助调用（情绪分析/表情包学习）异步执行，避免阻塞主对话
         self._background_tasks: set = set()
@@ -216,6 +221,10 @@ class Core(Star):
         # 情绪半衰衰减巡检：平滑恢复长时间未互动的会话情绪
         self._spawn_background(self._emotion_decay_loop())
 
+        # 机器人自主日常生活日程引擎：夜间自动规划
+        self._spawn_background(self._bot_life_schedule_loop())
+        self._spawn_background(self._ensure_today_life_schedule())
+
     async def _emotion_decay_loop(self):
         """周期性巡检情绪惯性并平滑衰减"""
         while self.running:
@@ -228,6 +237,58 @@ class Core(Star):
             except Exception as e:
                 logger.warning(f"[Fiscok's][emotion] 情绪半衰期衰减巡检异常: {e}")
                 await asyncio.sleep(60)
+
+    async def _ensure_today_life_schedule(self):
+        """启动后延迟 5 秒检查今日自主日程是否已生成，未生成则在后台规划"""
+        await asyncio.sleep(5)
+        life_cfg = self.config.get('bot_life_config', {})
+        if not life_cfg.get('available', True):
+            return
+        today_str = time.strftime("%Y-%m-%d", time.localtime())
+        if self.proactive_service._daily_life.get("date") != today_str:
+            logger.info(f"[Fiscok's][bot_life] 今日 ({today_str}) 自主生活日程尚未生成，正在启动后台初始化规划...")
+            await self._generate_today_life_schedule()
+
+    async def _bot_life_schedule_loop(self):
+        """每夜自动巡检并生成下一天/今天的自主生活日程"""
+        while self.running:
+            try:
+                await asyncio.sleep(600)  # 每 10 分钟检查一次
+                life_cfg = self.config.get('bot_life_config', {})
+                if not life_cfg.get('available', True) or not life_cfg.get('auto_generate_daily', True):
+                    continue
+                lt = time.localtime()
+                gen_hour = int(life_cfg.get('generate_hour', 3) or 3)
+                today_str = time.strftime("%Y-%m-%d", lt)
+                if self.proactive_service._daily_life.get("date") != today_str:
+                    if lt.tm_hour >= gen_hour:
+                        await self._generate_today_life_schedule()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[Fiscok's][bot_life] 日程巡检异常: {e}")
+                await asyncio.sleep(60)
+
+    async def _generate_today_life_schedule(self) -> bool:
+        """调用模型自主规划今日生活日程"""
+        life_cfg = self.config.get('bot_life_config', {})
+        provider_id = str(life_cfg.get('llm_provider_id', '') or '')
+        persona_prompt = self._persona_overlay or ""
+        recent_topics = ""
+        try:
+            # 提取近期话题记忆辅助日程主题
+            topics = self.data_manager.get_all_topics() if hasattr(self.data_manager, "get_all_topics") else []
+            if topics:
+                recent_topics = "、".join([t.get('text', '')[:20] for t in topics[-4:] if t.get('text')])
+        except Exception:
+            pass
+        return await self.proactive_service.generate_daily_schedule(
+            context=self.context,
+            provider_id=provider_id,
+            prompt_library=self.prompt_library,
+            persona_prompt=persona_prompt,
+            recent_topics=recent_topics,
+        )
 
     @property
     def current_emotion(self) -> str:
@@ -611,6 +672,36 @@ class Core(Star):
         except Exception as e:
             logger.warning(f"[Fiscok's][merge] 连续消息合并处理异常: {e}")
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=sys.maxsize - 12)
+    async def progression_intercept_on_message(self, event: AstrMessageEvent):
+        """
+        话题自动行进：在等待发送下一阶段期间拦截用户发言，重置倒计时并合并提问；若命中终止词则安全退出
+        """
+        prog_cfg = self.config.get('topic_progression_config', {})
+        if not prog_cfg.get('available', True):
+            return
+        try:
+            should_continue = await self.progression_service.handle_user_intercept(event, prog_cfg)
+            if not should_continue:
+                return
+        except Exception as e:
+            logger.warning(f"[Fiscok's][progression] 拦截用户插话异常: {e}")
+
+    @filter.on_llm_request()
+    async def on_llm_request_progression_protocol_hook(self, event: AstrMessageEvent, req: ProviderRequest):
+        """
+        在 LLM 请求阶段注入连续任务自主行进协议说明
+        """
+        prog_cfg = self.config.get('topic_progression_config', {})
+        if not prog_cfg.get('available', True):
+            return
+        if event.get_group_id() and not prog_cfg.get('allow_group', True):
+            return
+
+        protocol = self.prompt_library.get('topic_progression_protocol')
+        if protocol:
+            req.system_prompt = f"{req.system_prompt or ''}\n{protocol}".strip()
+
     @filter.on_llm_request()
     async def on_llm_request_topic_hook(self, event: AstrMessageEvent, req: ProviderRequest):
         """
@@ -674,54 +765,16 @@ class Core(Star):
             logger.warning(f"[Fiscok's][topic] 检索/注入话题记忆失败，不影响主请求: {e}")
 
     @filter.on_llm_request()
-    async def on_llm_request_context_trim_hook(self, event: AstrMessageEvent, req: ProviderRequest):
+    async def on_llm_request_clm_context_hook(self, event: AstrMessageEvent, req: ProviderRequest):
         """
-        上下文精简：由插件接管请求上下文裁剪，降低随历史累积而增长的 token 开销。
-        仅在配置开启时生效；默认不裁剪，保持原行为。
+        CLM 自主上下文管理：接替 AstrBot 原生上下文策略（基于 Meta FAIR 顶会论文 Context Language Models），
+        注入结构化工作记忆账本 (Context File)，替换冗长历史为最新紧凑缓冲，并在后台自动调度自主整理循环。
         """
         cfg = self.config.get('context_optimize_config', {})
-        if not cfg.get('available', False):
-            return
-
         try:
-            keep_recent = int(cfg.get('keep_recent_messages', 10) or 0)
-            max_chars = int(cfg.get('max_context_chars', 0) or 0)
-            contexts = getattr(req, 'contexts', None)
-            if not contexts:
-                return
-
-            trimmed = self._trim_contexts(contexts, keep_recent, max_chars)
-            if trimmed != contexts:
-                logger.info(f"[Fiscok's][context] 上下文精简：{len(contexts)} -> {len(trimmed)} 条")
-                req.contexts = trimmed
+            self.clm_context_service.process_llm_request(event, req, cfg)
         except Exception as e:
-            logger.warning(f"[Fiscok's][context] 上下文精简失败，不影响主请求: {e}")
-
-    @staticmethod
-    def _trim_contexts(contexts: List[Dict], keep_recent: int, max_chars: int) -> List[Dict]:
-        """
-        裁剪上下文：先按最近条数截断，再按字符上限从尾部向前保留。
-        至少保留最新一条；结果首条若为 assistant 则丢弃，避免角色序列异常。
-        """
-        if keep_recent > 0:
-            contexts = contexts[-keep_recent:]
-
-        if max_chars > 0:
-            kept = []
-            total = 0
-            for msg in reversed(contexts):
-                content = msg.get('content') if isinstance(msg, dict) else None
-                if not isinstance(content, str):
-                    content = str(content or '')
-                if kept and total + len(content) > max_chars:
-                    break
-                kept.append(msg)
-                total += len(content)
-            contexts = list(reversed(kept))
-
-        while contexts and isinstance(contexts[0], dict) and contexts[0].get('role') == 'assistant':
-            contexts = contexts[1:]
-        return contexts
+            logger.warning(f"[Fiscok's][clm] 上下文接管处理异常: {e}")
 
     @filter.on_llm_request()
     async def on_llm_request_hook(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -2243,6 +2296,48 @@ class Core(Star):
         return self._suzu_clipped_tags.pop(umo, {}) or {}
 
     @filter.on_decorating_result()
+    async def on_decorating_result_progression_hook(self, event: AstrMessageEvent):
+        """
+        话题自动行进：检测模型回复中的 [CONTINUE: ...] 或 [DONE]，
+        将其从可见 Plain 消息组件中裁剪，并启动/推进持续执行任务
+        """
+        result = event.get_result()
+        if result is None or not result.is_model_result() or not result.chain:
+            return
+
+        full_text = ""
+        has_tag = False
+        for component in result.chain:
+            if isinstance(component, Plain):
+                txt = component.text or ""
+                full_text += txt
+                if _PROGRESSION_TAG_RE.search(txt):
+                    has_tag = True
+
+        if not has_tag:
+            return
+
+        prog_cfg = self.config.get('topic_progression_config', {})
+        umo = event.unified_msg_origin
+        user_id = str(event.get_sender_id() or "")
+        nickname = self.nickname_service.get_anchored_nickname(user_id, event.get_sender_name() or "")
+
+        # 调用行进引擎启动或推进行进循环
+        self.progression_service.on_model_reply(
+            umo=umo,
+            user_id=user_id,
+            nickname=nickname,
+            raw_text=full_text,
+            config=prog_cfg,
+        )
+
+        # 裁剪 Plain 组件中的标签
+        for component in result.chain:
+            if isinstance(component, Plain):
+                component.text = _PROGRESSION_TAG_RE.sub('', component.text or '').strip()
+                component.text = re.sub(r'\n{3,}', '\n\n', component.text).strip()
+
+    @filter.on_decorating_result()
     async def on_decorating_result_sanitize_hook(self, event: AstrMessageEvent):
         """
         发送前兜底清理：若模型把 <system_reminder>（用户 ID、昵称、时间等内部提示）
@@ -2481,11 +2576,56 @@ class Core(Star):
             logger.error(f"[Fiscok's][image] 生成并发送图片失败: {e}", exc_info=True)
 
     @filter.command('bot_life_status', alias={'生活状态', '日常'})
-    async def bot_life_status(self, event: AstrMessageEvent):
+    async def bot_life_status(self, event: AstrMessageEvent, action: str = "", extra: str = ""):
         """
-        查看机器人此刻的虚拟日常状态、时空氛围与心情
+        查看或管理机器人今日自主虚拟生活日常
+        - /日常：查看当前生活状态与心情
+        - /日常 列表（或 /日常 日程）：查看今日 24 小时完整规划
+        - /日常 刷新（或 /日常 重新生成）：让模型立即重新构想今日日程
+        - /日常 设置 <内容>：手动设置此刻正在做的事情
+        - /日常 恢复：清除手动设置，恢复模型日程
         """
+        action = action.strip()
         sender_id = str(event.get_sender_id() or "")
+
+        if action in ("列表", "日程", "安排"):
+            schedule_data = self.proactive_service.get_today_schedule()
+            theme = schedule_data.get("day_theme", "平凡而美好的一天")
+            date_str = schedule_data.get("date", "")
+            lines = [f"📅 机器人今日日程规划 ({date_str})：\n🌿 主题：{theme}\n"]
+            for slot in schedule_data.get("schedule") or []:
+                lines.append(f"⏰ {slot.get('start'):02d}:00-{slot.get('end'):02d}:00 [{slot.get('period')}]：\n   {slot.get('activity')}")
+            yield event.plain_result("\n".join(lines))
+            return
+
+        if action in ("刷新", "重新生成", "重新规划"):
+            yield event.plain_result("正在调用模型重新构思今日 24 小时生活日程，请稍候…")
+            success = await self._generate_today_life_schedule()
+            if success:
+                schedule_data = self.proactive_service.get_today_schedule()
+                yield event.plain_result(
+                    f"✨ 规划完成！今日新主题：{schedule_data.get('day_theme')}\n"
+                    f"当前正在做：{self.proactive_service.get_bot_current_activity()}"
+                )
+            else:
+                yield event.plain_result("规划遇到异常，已平滑保留当前日程。")
+            return
+
+        if action in ("设置", "自定义"):
+            custom_act = extra.strip()
+            if not custom_act:
+                yield event.plain_result("格式：/日常 设置 <正在做的事情内容>")
+                return
+            self.proactive_service.set_custom_activity(custom_act)
+            yield event.plain_result(f"已手动将机器人此刻状态设定为：{custom_act}")
+            return
+
+        if action in ("恢复", "重置"):
+            self.proactive_service.clear_custom_activity()
+            yield event.plain_result(f"已清除手动设定，恢复模型自主日程：{self.proactive_service.get_bot_current_activity()}")
+            return
+
+        # 默认：查看当前生活状态
         circadian = self.proactive_service.get_circadian_hint(sender_id)
         scope_key = sender_id if not event.get_group_id() else event.unified_msg_origin
         current_emo = self.get_current_emotion(scope_key)
@@ -2495,9 +2635,37 @@ class Core(Star):
             f"🌿 机器人的虚拟日常：\n"
             f"{circadian}\n"
             f"此刻心情：{current_emo}\n"
-            f"当前正在做：{activity}"
+            f"当前正在做：{activity}\n\n"
+            f"（提示：输入「/日常 日程」可查看全天规划，输入「/日常 刷新」可让模型重新构思）"
         )
         yield event.plain_result(msg)
+
+    @filter.command('progression_status', alias={'行进状态', '任务状态'})
+    async def progression_status(self, event: AstrMessageEvent):
+        """查看当前会话的自动行进任务状态"""
+        umo = event.unified_msg_origin
+        session = self.progression_service.get_session(umo)
+        if not session or not session.is_active:
+            yield event.plain_result("当前会话没有正在运行的持续任务。")
+            return
+        status = "等待中" if session.is_waiting else "正在生成"
+        yield event.plain_result(
+            f"🔄 自动行进任务状态：\n"
+            f"目标：{session.task_goal}\n"
+            f"当前阶段：第 {session.round}/{session.max_rounds} 轮（{status}）\n"
+            f"下一步规划：{session.next_step}\n"
+            f"待合并插话数：{len(session.pending_user_messages)} 条"
+        )
+
+    @filter.command('progression_stop', alias={'停止任务', '结束任务'})
+    async def progression_stop(self, event: AstrMessageEvent):
+        """强制终止当前会话的自动行进任务"""
+        umo = event.unified_msg_origin
+        success = self.progression_service.stop_session(umo, "用户手动终止指令")
+        if success:
+            yield event.plain_result("已成功终止当前持续进行任务。")
+        else:
+            yield event.plain_result("当前会话没有正在运行的持续任务。")
 
     # 临时测试用指令
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -2992,6 +3160,53 @@ class Core(Star):
         sender_id = str(event.get_sender_id())
         self.commitment_service.clear_commitments(sender_id)
         yield event.plain_result("已清空你的全部关怀与约定记录")
+
+    # --- CLM 自主上下文工作记忆管理指令组 ---
+    @filter.command_group('context_manager', alias={'上下文'})
+    def context_manager(self):
+        pass
+
+    @context_manager.command('show', alias={'查看'})
+    async def context_show(self, event: AstrMessageEvent):
+        umo = event.unified_msg_origin
+        cf = self.clm_context_service.get_context_file(umo)
+        anchors_str = "\n".join([f"- {a}" for a in cf.pinned_anchors]) if cf.pinned_anchors else "（暂无）"
+        facts_str = "\n".join([f"- {f}" for f in cf.distilled_facts]) if cf.distilled_facts else "（暂无）"
+        summary_str = cf.milestone_summary or "（暂无）"
+        yield event.plain_result(
+            f"📑 上下文工作记忆账本 (Context File)：\n"
+            f"会话：{umo}\n"
+            f"轮数进度：{cf.turn_count} 轮（上次整理时间：{cf.last_compacted_at[:19]}）\n\n"
+            f"【核心目标与顶层约束】：\n{anchors_str}\n\n"
+            f"【关键事实与已确认要点】：\n{facts_str}\n\n"
+            f"【历史历程概要】：\n{summary_str}\n\n"
+            f"最新对话缓冲：{len(cf.recent_buffer)} 条"
+        )
+
+    @context_manager.command('compact', alias={'整理', '压缩'})
+    async def context_compact(self, event: AstrMessageEvent):
+        umo = event.unified_msg_origin
+        yield event.plain_result("正在为当前会话执行 CLM 自主上下文工作记忆整理与剪枝，请稍候…")
+        cfg = self.config.get('context_optimize_config', {})
+        success = await self.clm_context_service.compact_context_file(umo, cfg)
+        if success:
+            cf = self.clm_context_service.get_context_file(umo)
+            yield event.plain_result(
+                f"整理完成！当前工作记忆账本：{len(cf.pinned_anchors)} 项顶层约束，"
+                f"{len(cf.distilled_facts)} 条关键事实。"
+            )
+        else:
+            yield event.plain_result("整理未产生变动或遇到异常，请检查日志。")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @context_manager.command('reset', alias={'重置', '清空'})
+    async def context_reset(self, event: AstrMessageEvent):
+        umo = event.unified_msg_origin
+        success = self.clm_context_service.reset_context_file(umo)
+        if success:
+            yield event.plain_result("已清空重置当前会话的上下文工作记忆账本。")
+        else:
+            yield event.plain_result("重置失败或文件不存在。")
 
     # --- Instagram 缓存更新 ---
     async def instagram_cache_update(self):
