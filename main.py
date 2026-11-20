@@ -95,13 +95,16 @@ _INTERNAL_META_LINES = (
 
 
 def _strip_internal_leaks(text: str) -> str:
-    """清除模型误复述的内部提示与元信息行"""
+    """清除模型误复述的内部提示、元信息行以及可能残留泄露的生图/人设图占位符"""
     if not text:
         return text
     text = _INTERNAL_REMINDER_BLOCK.sub('', text)
     text = _INTERNAL_REMINDER_TAG.sub('', text)
     for pattern in _INTERNAL_META_LINES:
         text = pattern.sub('', text)
+    # 防御性清理未闭合或缺失冒号的生图/人设图占位符（如 [draw]描述 或 [draw:描述]）
+    text = re.sub(r'[\[【](?:draw|pic)\s*[:：].*?[\]】]', '', text)
+    text = re.sub(r'\[(?:draw|pic)\].*?(?=(?:\n|$))', '', text)
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
     return text
 
@@ -1799,15 +1802,14 @@ class Core(Star):
         image_config = self.config.get('persona_image_config', {})
         if is_private and image_config.get('available', False):
             tag = str(image_config.get('placeholder_tag') or 'pic').strip() or 'pic'
-            pattern = rf'\[{re.escape(tag)}:(.+?)\]'
-            keys = re.findall(pattern, text)
+            text, keys, _ = self._extract_persona_image_tags(text, tag)
             if keys:
                 images = list_persona_images(Path(self.plugin_data_path), image_config)
                 for key in keys:
                     img = resolve_persona_image(images, key)
                     if img:
                         images_to_send.append(img['path'])
-                text = re.sub(pattern, '', text).strip()
+            text = text.strip()
 
         seg_cfg = self.config.get('segmented_parser_config', {})
         if seg_cfg.get('available', False):
@@ -2221,8 +2223,8 @@ class Core(Star):
             image_config = self.config.get('persona_image_config', {})
             if image_config.get('available', False):
                 tag = str(image_config.get('placeholder_tag') or 'pic').strip() or 'pic'
-                pattern = rf'\[{re.escape(tag)}:(.+?)\]'
-                keys = re.findall(pattern, text)
+                text, keys, pat_list = self._extract_persona_image_tags(text, tag)
+                patterns.extend(pat_list)
                 if keys:
                     images = list_persona_images(Path(self.plugin_data_path), image_config)
                     for key in keys:
@@ -2232,20 +2234,16 @@ class Core(Star):
                             continue
                         images_to_attach.append(image['path'])
                         logger.info(f"[Fiscok's][image] 已标记人设图待发送: {image['path']}")
-                    text = re.sub(pattern, '', text)
-                    patterns.append(pattern)
 
             gen_config = self.config.get('image_gen_config', {})
             if gen_config.get('available', False) and str(gen_config.get('model') or '').strip():
                 tag = str(gen_config.get('placeholder_tag') or 'draw').strip() or 'draw'
-                pattern = rf'\[{re.escape(tag)}:(.+?)\]'
                 limit = max(1, int(gen_config.get('max_per_turn', 1) or 1))
-                prompts = [item.strip() for item in re.findall(pattern, text) if item.strip()]
+                text, prompts, pat_list = self._extract_draw_prompt_tags(text, tag, limit)
+                patterns.extend(pat_list)
                 if prompts:
                     draw_requests = prompts[:limit]
-                    text = re.sub(pattern, '', text)
-                    patterns.append(pattern)
-                    logger.info(f"[Fiscok's][image] 已登记生图请求 {len(draw_requests)} 个")
+                    logger.info(f"[Fiscok's][image] 已成功截获并登记生图请求 {len(draw_requests)} 个: {draw_requests}")
 
             if not patterns:
                 return
@@ -2266,6 +2264,91 @@ class Core(Star):
                     event.set_extra('_draw_requests', draw_requests)
         except Exception as e:
             logger.error(f"[Fiscok's][image] 处理图片占位符时出错: {e}", exc_info=True)
+
+    @staticmethod
+    def _extract_draw_prompt_tags(text: str, tag: str, limit: int = 1) -> tuple[str, List[str], List[str]]:
+        """
+        鲁棒提取生图提示词并从文本中彻底裁剪剥离，防止格式写歪（如缺少冒号/未闭合标签）导致泄露。
+        支持：
+        1. [draw:prompt] / [draw：prompt] / 【draw:prompt】 / 【draw：prompt】
+        2. [draw]prompt[/draw]
+        3. [draw]prompt（直到换行或文本末尾）
+        """
+        draw_prompts = []
+        patterns = []
+
+        # 1. 标准闭合标签（中英文方括号、中英文冒号）
+        p1 = rf'[\[【]{re.escape(tag)}\s*[:：]\s*(.+?)[\]】]'
+        for m in re.finditer(p1, text, flags=re.DOTALL):
+            p = m.group(1).strip()
+            if p and len(draw_prompts) < limit:
+                draw_prompts.append(p)
+        text = re.sub(p1, '', text)
+        patterns.append(p1)
+
+        # 2. 成对 BBCode 标签 [draw]...[/draw]
+        p2 = rf'\[{re.escape(tag)}\](.+?)\[/{re.escape(tag)}\]'
+        for m in re.finditer(p2, text, flags=re.DOTALL):
+            p = m.group(1).strip()
+            if p and len(draw_prompts) < limit:
+                draw_prompts.append(p)
+        text = re.sub(p2, '', text)
+        patterns.append(p2)
+
+        # 3. 容错前缀标签 [draw] 后面跟单行或未闭合描述（如 [draw]少女站立...）
+        p3 = rf'\[{re.escape(tag)}\]\s*(.+?)(?=(?:\n|$))'
+        for m in re.finditer(p3, text):
+            p = m.group(1).strip()
+            if p and len(draw_prompts) < limit:
+                draw_prompts.append(p)
+        text = re.sub(p3, '', text)
+        patterns.append(p3)
+
+        # 4. 兜底清除残留孤立标签
+        p4 = rf'[\[【]{re.escape(tag)}[\]】]'
+        text = re.sub(p4, '', text)
+        patterns.append(p4)
+
+        return text, draw_prompts, patterns
+
+    @staticmethod
+    def _extract_persona_image_tags(text: str, tag: str) -> tuple[str, List[str], List[str]]:
+        """
+        鲁棒提取人设图占位符。
+        支持：[pic:id], [pic：id], 【pic:id】, [pic]id[/pic], [pic]id
+        """
+        keys = []
+        patterns = []
+
+        p1 = rf'[\[【]{re.escape(tag)}\s*[:：]\s*(.+?)[\]】]'
+        for m in re.finditer(p1, text):
+            k = m.group(1).strip()
+            if k:
+                keys.append(k)
+        text = re.sub(p1, '', text)
+        patterns.append(p1)
+
+        p2 = rf'\[{re.escape(tag)}\]([A-Za-z0-9_\-\.\u4e00-\u9fa5]+)\[/{re.escape(tag)}\]'
+        for m in re.finditer(p2, text):
+            k = m.group(1).strip()
+            if k:
+                keys.append(k)
+        text = re.sub(p2, '', text)
+        patterns.append(p2)
+
+        p3 = rf'\[{re.escape(tag)}\]\s*([A-Za-z0-9_\-\.\u4e00-\u9fa5]+)'
+        for m in re.finditer(p3, text):
+            k = m.group(1).strip()
+            if k:
+                keys.append(k)
+        text = re.sub(p3, '', text)
+        patterns.append(p3)
+
+        p4 = rf'[\[【]{re.escape(tag)}[\]】]'
+        text = re.sub(p4, '', text)
+        patterns.append(p4)
+
+        return text, keys, patterns
 
     @staticmethod
     def _strip_patterns_from_chain(resp, patterns: List[str]):
